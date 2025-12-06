@@ -7,8 +7,14 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script type="module">
         // --- Gemini API Key (Inserted for OCR Functionality) ---
-        // The environment often injects the key, but we'll use the user-provided one directly here.
+        // Replace with your key if the environment doesn't inject it automatically
         const API_KEY = "AIzaSyDY4WzONgT0QJB9Eo2u8xHuwH-wTBAuuMA"; 
+
+        // --- Formspree Configuration ---
+        // 1. UPDATED with your 8-digit hash code: xzznvqld
+        const FORMSPREE_ACTION_URL = "https://formspree.io/f/xzznvqld";
+        // 2. Placeholder email for Formspree verification
+        const RECIPIENT_EMAIL_FALLBACK = "lachlandkennedy@icloud.com"; 
 
         // --- Firebase Initialization (Mandatory Global Variables) ---
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
@@ -235,7 +241,7 @@
             compileAndDisplayData(false); // Passive compile
         }
 
-        // --- GEMINI OCR FUNCTIONS ---
+        // --- GEMINI OCR FUNCTIONS (Unchanged) ---
 
         /** Converts a File object to a Base64 string and returns the mime type */
         function fetchAndConvertToBase64(file) {
@@ -327,7 +333,6 @@
                     const responseText = await response.text();
 
                     if (!response.ok) {
-                        // Attempt to parse error response for better logging
                         let errorBody = responseText;
                         try {
                             errorBody = JSON.parse(responseText);
@@ -342,7 +347,6 @@
                          throw new Error("API returned an empty or malformed response text.");
                     }
                     
-                    // Attempt to parse the structured JSON response
                     try {
                         return { success: true, data: JSON.parse(jsonString) };
                     } catch (e) {
@@ -414,8 +418,7 @@
                 // Display raw text
                 document.getElementById('ocrRawTextOutput').textContent = rawText;
                 
-                // Save the new data to Firestore (which is now triggered by form changes)
-                // If the form fields didn't change (e.g., studentName was empty), force save:
+                // Save the new data to Firestore 
                 saveDataToFirestore(); 
 
                 statusDiv.innerHTML = `<span class="text-green-600 font-semibold">Scan Complete!</span> Data loaded into the form for review.`;
@@ -590,7 +593,47 @@
             }
         }
 
-        // --- EMAIL SENDING FUNCTION VIA MOCK API (since no real keys are available) ---
+        /** Helper function to format the cached data into a readable text body for the email */
+        function generateEmailBody(data) {
+            let body = `--- Student Schedule Submission ---\n\n`;
+            body += `Recipient Email (Entered in Form): ${data.email || 'N/A'}\n`;
+
+            const digital = data.Digital_Input;
+            body += `\n=== DIGITAL FORM DATA ===\n`;
+            body += `Student Name: ${digital.studentName || 'N/A'}\n`;
+            body += `Current Grade: ${digital.currentYear || 'N/A'}\n`;
+            body += `Diploma Type: ${digital.diploma || 'N/A'}\n\n`;
+
+            body += `--- CURRENT YEAR COURSES ---\n`;
+            if (digital.currentCourses.length > 0) {
+                digital.currentCourses.forEach((c, i) => body += `\t- Course ${i + 1}: ${c}\n`);
+            } else {
+                body += `\t- No courses selected for the current year.\n`;
+            }
+
+            body += `\n--- 4-YEAR PLAN ---\n`;
+            for (const year in digital.fourYearPlan) {
+                body += `${year}:\n`;
+                digital.fourYearPlan[year].forEach(c => body += `\t- ${c}\n`);
+            }
+
+            if (data.OCR_Result_Last_Scan) {
+                const ocr = data.OCR_Result_Last_Scan;
+                body += `\n=== LAST OCR SCAN RESULT (For Verification) ===\n`;
+                body += `OCR Name: ${ocr.studentName || 'N/A'}\n`;
+                body += `OCR Grade: ${ocr.gradeLevel || 'N/A'}\n`;
+                body += `OCR Diploma: ${ocr.diploma || 'N/A'}\n`;
+                body += `OCR Courses Extracted:\n`;
+                ocr.currentCourses.forEach(c => body += `\t- ${c}\n`);
+            }
+            
+            body += `\n---------------------------------------\n`;
+            body += `Raw Text from Card (if scanned):\n${currentPlanData.rawText || 'N/A'}\n`;
+
+            return body;
+        }
+
+        /** Sends data to Formspree for actual email delivery */
         async function sendDataViaAPI() {
             const statusDiv = document.getElementById('statusMessage');
             const sendButton = document.getElementById('sendButton');
@@ -599,35 +642,57 @@
                 statusDiv.textContent = "Please compile the data first.";
                 return;
             }
-
-            const recipientEmail = finalDataCache.email;
-
-            sendButton.disabled = true;
-            statusDiv.innerHTML = `<span class="text-blue-600 font-semibold">Simulating Send...</span>`;
-
-            // --- MOCK API CALL SIMULATION ---
-            await new Promise(resolve => setTimeout(resolve, 1500)); 
-            const success = recipientEmail && recipientEmail.includes('@'); // Simple check for mock success
-
-            if (success) {
-                statusDiv.innerHTML = `<br>
-                    <span class="text-green-600 font-semibold">Success!</span>
-                    The schedule data was *simulated* to be sent to
-                    <span class="font-mono bg-green-100 p-1 rounded">${recipientEmail}</span>.
-                    <br>
-                    <span class="text-sm text-gray-600">Note: Real email functionality requires a secure, deployed backend server.</span>
-                `;
-            } else {
-                 statusDiv.innerHTML = `<br>
-                    <span class="text-red-600 font-semibold">Error!</span>
-                    Failed to send email. Please ensure a valid recipient email is entered.
-                `;
-            }
-            // --- END MOCK API CALL SIMULATION ---
             
-            sendButton.disabled = false;
+            sendButton.disabled = true;
+            statusDiv.innerHTML = `<span class="text-blue-600 font-semibold">Sending email securely...</span>`;
+
+            const recipientEmail = finalDataCache.email || RECIPIENT_EMAIL_FALLBACK;
+            const studentName = finalDataCache.Digital_Input.studentName || 'A Student';
+            
+            // 1. Prepare the payload for Formspree
+            const emailBody = generateEmailBody(finalDataCache);
+            const formData = new FormData();
+            
+            // Required Formspree fields for Subject, Recipient, and Reply-To
+            formData.append('subject', `[Schedule Submission] ${studentName}'s 4-Year Plan`);
+            formData.append('_to', RECIPIENT_EMAIL_FALLBACK); // The email address registered with Formspree (your email)
+            formData.append('_replyto', finalDataCache.email || 'no-reply-email@example.com'); // Student/Parent's email address
+            
+            // The main body of the email
+            formData.append('Schedule_Data', emailBody); 
+
+            // 2. Send the data
+            try {
+                const response = await fetch(FORMSPREE_ACTION_URL, {
+                    method: 'POST',
+                    body: formData,
+                    headers: { 'Accept': 'application/json' }
+                });
+
+                if (response.ok) {
+                    statusDiv.innerHTML = `<br>
+                        <span class="text-green-600 font-semibold">Success!</span>
+                        The schedule data was sent to
+                        <span class="font-mono bg-green-100 p-1 rounded">${RECIPIENT_EMAIL_FALLBACK}</span>.
+                    `;
+                } else {
+                    const data = await response.json();
+                    const errorMessage = data.error || 'Check the console for details.';
+                    statusDiv.innerHTML = `<br>
+                        <span class="text-red-600 font-semibold">Error!</span>
+                        Failed to send email. Ensure you have correctly set up your Formspree hash and verified the recipient email.
+                        <br><span class="text-sm text-gray-600">Details: ${errorMessage}</span>
+                    `;
+                    console.error("Formspree Error:", data);
+                }
+            } catch (error) {
+                console.error("Email API Submission Error:", error);
+                statusDiv.innerHTML = `<br><span class="text-red-600 font-semibold">Error!</span> An unexpected network error occurred.`;
+            } finally {
+                sendButton.disabled = false;
+            }
         }
-        // --- END EMAIL SENDING FUNCTION VIA MOCK API ---
+        // --- END EMAIL SENDING FUNCTION ---
 
 
         /** Generates HTML options for a given category */
@@ -786,8 +851,9 @@
                     </select>
                 </div>
                 <div>
-                    <label for="recipientEmail" class="block text-sm font-medium text-gray-700 mb-1">Recipient Email (Counselor/Parent)</label>
-                    <input type="email" id="recipientEmail" placeholder="counselor@school.edu" class="w-full p-2.5 border border-gray-300 rounded-lg shadow-sm focus:ring-purple-500 focus:border-purple-500">
+                    <!-- IMPORTANT: This email is used as the 'Reply-To' for the Formspree email -->
+                    <label for="recipientEmail" class="block text-sm font-medium text-gray-700 mb-1">Your Email Address (or Parent/Guardian)</label>
+                    <input type="email" id="recipientEmail" placeholder="parent@home.com" class="w-full p-2.5 border border-gray-300 rounded-lg shadow-sm focus:ring-purple-500 focus:border-purple-500">
                 </div>
             </div>
 
@@ -856,7 +922,7 @@
             
         </div>
         
-        <!-- OCR Upload Section (Moved to bottom) -->
+        <!-- OCR Upload Section -->
         <div class="space-y-4 mb-8 p-6 border border-gray-300 rounded-xl bg-gray-50 shadow-inner">
             <h2 class="text-xl font-bold text-gray-800">3. Scan Schedule Card (Optional OCR)</h2>
             <p class="text-gray-600">
@@ -892,7 +958,7 @@
                 </button>
                 <button id="sendButton" disabled
                     class="flex-1 bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-4 rounded-lg transition duration-150 ease-in-out shadow-md hover:shadow-lg disabled:bg-gray-400">
-                    2. Send Data via Mock API
+                    2. Send Data via Email
                 </button>
             </div>
             
