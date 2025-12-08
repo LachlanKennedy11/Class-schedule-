@@ -6,20 +6,14 @@
     <title>Student Schedule Planner with OCR and Firestore</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script type="module">
-        // --- Gemini API Key (Inserted for OCR Functionality) ---
-        // Replace with your key if the environment doesn't inject it automatically
-        const API_KEY = "AIzaSyDY4WzONgT0QJB9Eo2u8xHuwH-wTBAuuMA"; 
-
-        // --- Formspree Configuration ---
-        // 1. UPDATED with your 8-digit hash code: xzznvqld
-        const FORMSPREE_ACTION_URL = "https://formspree.io/f/xzznvqld";
-        // 2. Placeholder email for Formspree verification
-        const RECIPIENT_EMAIL_FALLBACK = "lachlandkennedy@icloud.com"; 
+        // IMPORTANT: The OCR feature requires a Google Gemini API Key. 
+        // Please insert your key here when you obtain it.
+        const API_KEY = "AIzaSyD73nlmmDQlsWo-2mxUvszjXgMtQ7VMu64"; // Replace with your actual Gemini API Key
 
         // --- Firebase Initialization (Mandatory Global Variables) ---
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, onSnapshot, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
         // Firestore paths
         const DATA_COLLECTION = 'schedule_plans';
@@ -241,17 +235,16 @@
             compileAndDisplayData(false); // Passive compile
         }
 
-        // --- GEMINI OCR FUNCTIONS (Unchanged) ---
+        // --- GEMINI OCR FUNCTIONS ---
 
-        /** Converts a File object to a Base64 string and returns the mime type */
+        /** Converts a File object to a Base64 string */
         function fetchAndConvertToBase64(file) {
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onload = () => {
-                    // Extract base64 data (remove the prefix 'data:image/jpeg;base64,', etc.)
+                    // Extract base64 data (remove the prefix 'data:image/jpeg;base64,')
                     const base64String = reader.result.split(',')[1];
-                    const mimeType = file.type;
-                    resolve({ base64: base64String, mimeType: mimeType });
+                    resolve(base64String);
                 };
                 reader.onerror = error => reject(error);
                 reader.readAsDataURL(file);
@@ -259,9 +252,10 @@
         }
 
         /** Calls the Gemini API for image recognition/OCR */
-        async function callGeminiAPI(base64ImageData, mimeType) {
+        async function callGeminiAPI(base64ImageData) {
             if (!API_KEY) {
-                return { error: true, message: "API key is missing. Cannot perform OCR." };
+                // This check should already be handled by processOCRData, but included for completeness
+                return { error: true, message: "API key is missing in the code." }; 
             }
 
             const prompt = `You are a scheduling assistant. Extract the following information from the schedule card image: Student Name, Current Grade Level (9, 10, 11, or 12), Diploma Type (Standard, Honors, or Work Force), and a list of all course selections.
@@ -293,7 +287,8 @@
                         { text: prompt },
                         {
                             inlineData: {
-                                mimeType: mimeType, 
+                                // Assuming image/jpeg. Change if the file handler changes mime type.
+                                mimeType: 'image/jpeg', 
                                 data: base64ImageData
                             }
                         }
@@ -329,39 +324,29 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(payload)
                     });
-                    
-                    const responseText = await response.text();
 
                     if (!response.ok) {
-                        let errorBody = responseText;
-                        try {
-                            errorBody = JSON.parse(responseText);
-                        } catch(e) { /* ignore parse error */ }
-                        throw new Error(`API Request Failed (HTTP ${response.status}): ${JSON.stringify(errorBody, null, 2)}`);
+                        const errorBody = await response.json();
+                        throw new Error(`API Error: ${response.status} - ${JSON.stringify(errorBody)}`);
                     }
 
-                    const result = JSON.parse(responseText);
+                    const result = await response.json();
                     const jsonString = result.candidates?.[0]?.content?.parts?.[0]?.text;
-                    
                     if (!jsonString) {
-                         throw new Error("API returned an empty or malformed response text.");
+                         throw new Error("API returned an empty or malformed response.");
                     }
                     
-                    try {
-                        return { success: true, data: JSON.parse(jsonString) };
-                    } catch (e) {
-                         console.error("Failed to parse Gemini model's output as JSON:", jsonString);
-                         throw new Error("Model response was not valid JSON. Response Text: " + jsonString.substring(0, 200) + "...");
-                    }
+                    return { success: true, data: JSON.parse(jsonString) };
 
                 } catch (error) {
-                    console.error(`Attempt ${attempts + 1} failed:`, error);
+                    // Do not log retries as errors, but log final failure
                     attempts++;
                     if (attempts < maxAttempts) {
                         const delay = Math.pow(2, attempts) * 1000;
                         await new Promise(resolve => setTimeout(resolve, delay));
                     } else {
-                        return { error: true, message: "All API attempts failed.", details: error.message };
+                        console.error(`Final API attempt failed after ${maxAttempts} tries:`, error);
+                        return { error: true, message: "All API attempts failed. Check your key and network connection.", details: error.message };
                     }
                 }
             }
@@ -385,23 +370,24 @@
             }
             
             if (!API_KEY) {
-                statusDiv.innerHTML = `<span class="text-red-600 font-semibold">Error:</span> Please add your Google Gemini API Key to the code to use the OCR feature.`;
+                statusDiv.innerHTML = `<span class="text-red-600 font-semibold">Error:</span> The Gemini API Key is missing in the code. Please add your key to enable the scanner.`;
                 return;
             }
 
-            statusDiv.innerHTML = `<span class="text-blue-600 font-semibold">Scanning card... This may take a moment.</span>`;
+
+            statusDiv.innerHTML = `<span class="text-blue-600 font-semibold">Scanning card... Uploading image and waiting for AI response.</span>`;
             scanButton.disabled = true;
             document.getElementById('ocrRawTextOutput').textContent = 'Scanning...';
 
             try {
-                // 1. Convert image to Base64 and get MimeType
-                const { base64: base64Data, mimeType } = await fetchAndConvertToBase64(file);
+                // 1. Convert image to Base64
+                const base64Data = await fetchAndConvertToBase64(file);
                 
                 // 2. Call Gemini API
-                const apiResult = await callGeminiAPI(base64Data, mimeType);
+                const apiResult = await callGeminiAPI(base64Data);
 
                 if (apiResult.error) {
-                    statusDiv.innerHTML = `<span class="text-red-600 font-semibold">OCR Failed:</span> ${apiResult.message}. See console for details.`;
+                    statusDiv.innerHTML = `<span class="text-red-600 font-semibold">OCR Failed:</span> ${apiResult.message}. Details: ${apiResult.details}`;
                     return;
                 }
 
@@ -418,16 +404,15 @@
                 // Display raw text
                 document.getElementById('ocrRawTextOutput').textContent = rawText;
                 
-                // Save the new data to Firestore 
-                saveDataToFirestore(); 
+                // Saving is triggered by applyOCRToForm
+                // saveDataToFirestore(); 
 
-                statusDiv.innerHTML = `<span class="text-green-600 font-semibold">Scan Complete!</span> Data loaded into the form for review.`;
+                statusDiv.innerHTML = `<span class="text-green-600 font-semibold">Scan Complete!</span> Data loaded into the form for review and saved.`;
 
             } catch (error) {
                 console.error("OCR Process Error:", error);
-                statusDiv.innerHTML = `<span class="text-red-600 font-semibold">An unexpected error occurred:</span> ${error.message}`;
+                statusDiv.innerHTML = `<span class="text-red-600 font-semibold">An unexpected error occurred:</span> ${error.message}.`;
             } finally {
-                // IMPORTANT: Ensure button is always re-enabled
                 scanButton.disabled = false;
             }
         }
@@ -454,7 +439,7 @@
                 // Simple keyword matching for diploma type
                 if (diplomaText.includes(radioValue) || 
                     (radioValue === 'work force' && diplomaText.includes('work')) ||
-                    (radioValue === 'honors' && diplomaText.includes('adv')) 
+                    (radioValue === 'honors' && (diplomaText.includes('honors') || diplomaText.includes('adv'))) 
                 ) {
                     radio.checked = true;
                 }
@@ -471,10 +456,9 @@
                 data.currentCourses.forEach((courseName, index) => {
                     if (index < currentCourseSelects.length) {
                         const select = currentCourseSelects[index];
-                        // We iterate through all options to find the best case-insensitive match
+                        // Find the closest match in the dropdown options
                         const courseMatch = Array.from(select.options).find(opt => 
-                            opt.value.toLowerCase().includes(courseName.toLowerCase()) || 
-                            courseName.toLowerCase().includes(opt.value.toLowerCase())
+                            opt.value.toLowerCase().includes(courseName.toLowerCase())
                         );
                         if (courseMatch) {
                             select.value = courseMatch.value;
@@ -489,16 +473,14 @@
         // --- END GEMINI OCR FUNCTIONS ---
 
 
-        /** Main function to compile all data and display. 
-         * @param {boolean} isManual - True if called by button click, false if called by load/change listener.
-         */
-        async function compileAndDisplayData(isManual = true) {
+        /** Main function to compile all data and display. */
+        async function compileAndDisplayData(isManualTrigger = true) {
             const formInputs = document.getElementById('digitalForm');
             const outputDiv = document.getElementById('extractionOutput');
             const statusDiv = document.getElementById('statusMessage');
             const sendButton = document.getElementById('sendButton');
             
-            if (isManual) {
+            if (isManualTrigger) {
                 outputDiv.innerHTML = '';
                 sendButton.disabled = true;
                 statusDiv.textContent = "Compiling digital data...";
@@ -588,52 +570,12 @@
                 </div>
             `;
             sendButton.disabled = false;
-            if (isManual) {
+            if (isManualTrigger) {
                 statusDiv.textContent = "Data compiled. Review the summary and click 'Send'.";
             }
         }
 
-        /** Helper function to format the cached data into a readable text body for the email */
-        function generateEmailBody(data) {
-            let body = `--- Student Schedule Submission ---\n\n`;
-            body += `Recipient Email (Entered in Form): ${data.email || 'N/A'}\n`;
-
-            const digital = data.Digital_Input;
-            body += `\n=== DIGITAL FORM DATA ===\n`;
-            body += `Student Name: ${digital.studentName || 'N/A'}\n`;
-            body += `Current Grade: ${digital.currentYear || 'N/A'}\n`;
-            body += `Diploma Type: ${digital.diploma || 'N/A'}\n\n`;
-
-            body += `--- CURRENT YEAR COURSES ---\n`;
-            if (digital.currentCourses.length > 0) {
-                digital.currentCourses.forEach((c, i) => body += `\t- Course ${i + 1}: ${c}\n`);
-            } else {
-                body += `\t- No courses selected for the current year.\n`;
-            }
-
-            body += `\n--- 4-YEAR PLAN ---\n`;
-            for (const year in digital.fourYearPlan) {
-                body += `${year}:\n`;
-                digital.fourYearPlan[year].forEach(c => body += `\t- ${c}\n`);
-            }
-
-            if (data.OCR_Result_Last_Scan) {
-                const ocr = data.OCR_Result_Last_Scan;
-                body += `\n=== LAST OCR SCAN RESULT (For Verification) ===\n`;
-                body += `OCR Name: ${ocr.studentName || 'N/A'}\n`;
-                body += `OCR Grade: ${ocr.gradeLevel || 'N/A'}\n`;
-                body += `OCR Diploma: ${ocr.diploma || 'N/A'}\n`;
-                body += `OCR Courses Extracted:\n`;
-                ocr.currentCourses.forEach(c => body += `\t- ${c}\n`);
-            }
-            
-            body += `\n---------------------------------------\n`;
-            body += `Raw Text from Card (if scanned):\n${currentPlanData.rawText || 'N/A'}\n`;
-
-            return body;
-        }
-
-        /** Sends data to Formspree for actual email delivery */
+        // --- EMAIL SENDING FUNCTION VIA MOCK API (since no real keys are available) ---
         async function sendDataViaAPI() {
             const statusDiv = document.getElementById('statusMessage');
             const sendButton = document.getElementById('sendButton');
@@ -642,57 +584,35 @@
                 statusDiv.textContent = "Please compile the data first.";
                 return;
             }
-            
+
+            const recipientEmail = finalDataCache.email;
+
             sendButton.disabled = true;
-            statusDiv.innerHTML = `<span class="text-blue-600 font-semibold">Sending email securely...</span>`;
+            statusDiv.innerHTML = `<span class="text-blue-600 font-semibold">Simulating Send...</span>`;
 
-            const recipientEmail = finalDataCache.email || RECIPIENT_EMAIL_FALLBACK;
-            const studentName = finalDataCache.Digital_Input.studentName || 'A Student';
-            
-            // 1. Prepare the payload for Formspree
-            const emailBody = generateEmailBody(finalDataCache);
-            const formData = new FormData();
-            
-            // Required Formspree fields for Subject, Recipient, and Reply-To
-            formData.append('subject', `[Schedule Submission] ${studentName}'s 4-Year Plan`);
-            formData.append('_to', RECIPIENT_EMAIL_FALLBACK); // The email address registered with Formspree (your email)
-            formData.append('_replyto', finalDataCache.email || 'no-reply-email@example.com'); // Student/Parent's email address
-            
-            // The main body of the email
-            formData.append('Schedule_Data', emailBody); 
+            // --- MOCK API CALL SIMULATION ---
+            await new Promise(resolve => setTimeout(resolve, 1500)); 
+            const success = recipientEmail && recipientEmail.includes('@'); // Simple check for mock success
 
-            // 2. Send the data
-            try {
-                const response = await fetch(FORMSPREE_ACTION_URL, {
-                    method: 'POST',
-                    body: formData,
-                    headers: { 'Accept': 'application/json' }
-                });
-
-                if (response.ok) {
-                    statusDiv.innerHTML = `<br>
-                        <span class="text-green-600 font-semibold">Success!</span>
-                        The schedule data was sent to
-                        <span class="font-mono bg-green-100 p-1 rounded">${RECIPIENT_EMAIL_FALLBACK}</span>.
-                    `;
-                } else {
-                    const data = await response.json();
-                    const errorMessage = data.error || 'Check the console for details.';
-                    statusDiv.innerHTML = `<br>
-                        <span class="text-red-600 font-semibold">Error!</span>
-                        Failed to send email. Ensure you have correctly set up your Formspree hash and verified the recipient email.
-                        <br><span class="text-sm text-gray-600">Details: ${errorMessage}</span>
-                    `;
-                    console.error("Formspree Error:", data);
-                }
-            } catch (error) {
-                console.error("Email API Submission Error:", error);
-                statusDiv.innerHTML = `<br><span class="text-red-600 font-semibold">Error!</span> An unexpected network error occurred.`;
-            } finally {
-                sendButton.disabled = false;
+            if (success) {
+                statusDiv.innerHTML = `<br>
+                    <span class="text-green-600 font-semibold">Success!</span>
+                    The schedule data was *simulated* to be sent to
+                    <span class="font-mono bg-green-100 p-1 rounded">${recipientEmail}</span>.
+                    <br>
+                    <span class="text-sm text-gray-600">Note: Real email functionality requires a secure, deployed backend server.</span>
+                `;
+            } else {
+                 statusDiv.innerHTML = `<br>
+                    <span class="text-red-600 font-semibold">Error!</span>
+                    Failed to send email. Please ensure a valid recipient email is entered.
+                `;
             }
+            // --- END MOCK API CALL SIMULATION ---
+            
+            sendButton.disabled = false;
         }
-        // --- END EMAIL SENDING FUNCTION ---
+        // --- END EMAIL SENDING FUNCTION VIA MOCK API ---
 
 
         /** Generates HTML options for a given category */
@@ -790,6 +710,16 @@
                 container.appendChild(createPlanSlot(slot.name, slot.categories, year.replace(/\s/g, ''))); 
             });
         }
+        
+        /** Checks the API key status and updates the UI */
+        function checkApiKeyStatus() {
+            const statusEl = document.getElementById('apiKeyStatus');
+            if (API_KEY && API_KEY.length > 5) {
+                statusEl.innerHTML = `<span class="text-green-600">✅ Key Detected. OCR Ready.</span>`;
+            } else {
+                statusEl.innerHTML = `<span class="text-red-600 font-bold">❌ API Key Missing!</span> Add your key to the code to enable scanning.`;
+            }
+        }
 
         window.onload = () => {
             // Populate Current Year Schedule with 8 generic dropdowns
@@ -812,6 +742,9 @@
             document.getElementById('compileButton').addEventListener('click', () => compileAndDisplayData(true));
             document.getElementById('sendButton').addEventListener('click', sendDataViaAPI);
             document.getElementById('scanButton').addEventListener('click', processOCRData);
+            
+            // Initial check for the API key status
+            checkApiKeyStatus();
         };
     </script>
     <style>
@@ -851,9 +784,8 @@
                     </select>
                 </div>
                 <div>
-                    <!-- IMPORTANT: This email is used as the 'Reply-To' for the Formspree email -->
-                    <label for="recipientEmail" class="block text-sm font-medium text-gray-700 mb-1">Your Email Address (or Parent/Guardian)</label>
-                    <input type="email" id="recipientEmail" placeholder="parent@home.com" class="w-full p-2.5 border border-gray-300 rounded-lg shadow-sm focus:ring-purple-500 focus:border-purple-500">
+                    <label for="recipientEmail" class="block text-sm font-medium text-gray-700 mb-1">Recipient Email (Counselor/Parent)</label>
+                    <input type="email" id="recipientEmail" placeholder="counselor@school.edu" class="w-full p-2.5 border border-gray-300 rounded-lg shadow-sm focus:ring-purple-500 focus:border-purple-500">
                 </div>
             </div>
 
@@ -922,15 +854,19 @@
             
         </div>
         
-        <!-- OCR Upload Section -->
+        <!-- OCR Upload Section (Moved to bottom) -->
         <div class="space-y-4 mb-8 p-6 border border-gray-300 rounded-xl bg-gray-50 shadow-inner">
             <h2 class="text-xl font-bold text-gray-800">3. Scan Schedule Card (Optional OCR)</h2>
             <p class="text-gray-600">
-                Upload an image of your physical schedule card. The system will read the text and attempt to auto-fill the form above.
+                Upload an **image** (JPEG or PNG) of your physical schedule card. The system will read the text and attempt to auto-fill the form above.
             </p>
             
+            <div id="apiKeyStatus" class="text-sm text-center p-2 rounded">
+                <!-- API Key Status will be injected here by JavaScript -->
+            </div>
+            
             <div class="flex flex-col sm:flex-row gap-4">
-                <input type="file" id="fileInput" accept="image/*" class="flex-1 w-full p-2.5 border border-gray-300 rounded-lg shadow-sm bg-white file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-purple-100 file:text-purple-700 hover:file:bg-purple-200">
+                <input type="file" id="fileInput" accept="image/jpeg, image/png" class="flex-1 w-full p-2.5 border border-gray-300 rounded-lg shadow-sm bg-white file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-red-100 file:text-red-700 hover:file:bg-red-200">
                 <button id="scanButton"
                     class="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-150 ease-in-out shadow-md hover:shadow-lg disabled:bg-gray-400">
                     Scan Card (Extract Data)
@@ -958,7 +894,7 @@
                 </button>
                 <button id="sendButton" disabled
                     class="flex-1 bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-4 rounded-lg transition duration-150 ease-in-out shadow-md hover:shadow-lg disabled:bg-gray-400">
-                    2. Send Data via Email
+                    2. Send Data via Mock API
                 </button>
             </div>
             
