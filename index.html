@@ -1,295 +1,209 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Student Schedule Planner with OCR and Firestore</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script type="module">
-        // IMPORTANT: The OCR feature requires a Google Gemini API Key. 
-        // Please insert your key here when you obtain it.
-        const API_KEY = "AIzaSyD73nlmmDQlsWo-2mxUvszjXgMtQ7VMu64"; // Replace with your actual Gemini API Key
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Mail, Upload, List, User, CheckCircle, RotateCcw } from 'lucide-react';
 
-        // --- Firebase Initialization (Mandatory Global Variables) ---
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+// --- CONFIGURATION ---
+// FORMSPREE ENDPOINT: This URL is used to submit the form data to your email address.
+const FORMSPREE_ENDPOINT = 'https://formspree.io/f/xzznvqld';
+// --- END CONFIGURATION ---
+
+
+// --- UTILITY FUNCTIONS ---
+
+/**
+ * Converts a File object to a Base64 encoded string.
+ * This is necessary to send the image/PDF content to the Gemini API.
+ */
+const fileToBase64 = (file) => {
+    return new Promise((resolve, reject) => {
+        if (!file) {
+            reject(new Error("No file provided."));
+            return;
+        }
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve(reader.result.split(',')[1]); // Remove the data URI prefix
+        reader.onerror = error => reject(error);
+    });
+};
+
+/**
+ * Utility function to handle API fetching with exponential backoff.
+ */
+const fetchWithExponentialBackoff = async (url, options, maxRetries = 5) => {
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            const response = await fetch(url, options);
+            if (response.ok) {
+                return await response.json();
+            }
+            if (response.status === 429 && attempt < maxRetries - 1) {
+                const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+                await new Promise(res => setTimeout(res, delay));
+                continue;
+            }
+            throw new Error(`API request failed with status: ${response.status} ${response.statusText}`);
+        } catch (error) {
+            if (attempt === maxRetries - 1) throw error;
+            const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+            await new Promise(res => setTimeout(res, delay));
+        }
+    }
+};
+
+
+// --- DATA STRUCTURES EXTRACTED FROM PDF ---
+// This data is pre-processed from the 2025-2026 Choice Cards (1) (1).pdf
+const COURSE_DATA = {
+    '9th Grade': {
+        ENGLISH: ["English, Grade 9", "English, Grade 9, Adv Level"],
+        'SOCIAL STUDIES': ["World History: 1500-Pres, Gr 9", "World History, AP*"],
+        SCIENCE: ["Biology", "Biology, Advanced Level*", "Physical Science"],
+        MATHEMATICS: ["Geometry w/ Data Analysis", "Geometry w/ Data Analysis, Advanced*"],
+        'WORLD LANGUAGES': ["Spanish 1", "Spanish 2 (ONLY for those who took Spanish 1 in 8th grade)"],
+        'FINE ARTS': ["Color Guard*/**(Fall Only)", "Concert Band (Spring)*/**", "Concert Chorus", "Instrumental Tech*/**", "Journalism 1***", "Marching Band (Fall)*/**", "Theatre, Theatre I*", "Visual Arts I*", "Vocal Tech"],
+        'CAREER/TECHNICAL': ["Business Software Applications I* (CP-A)", "Civil Air Patrol I", "Education and Training Foundations*(CP-A)", "Engineering Essentials (CP-A)*", "Exploring Computer Science (CP-A)", "Family and Consumer Science", "Foundations of Health Services*", "Fundamentals of Agriscience (CP-A)", "Intro to Law and American Legal Systems(CP-A)", "Introduction to Manufacturing/Workforce Readiness (CP-A)*", "Sports and Entertainment Marketing Fund"],
+        ELECTIVES: ["ACT Prep (1 sem)", "Career Preparedness-A (1 sem)", "Driver and Traffic Safety Education* (1 sem)", "eSports", "Health Education (1 sem)", "Yearbook***", "PE/ATHLETICS FOR FEMALES", "PE/ATHLETICS FOR MALES", "VIRTUAL/ACCESS", "ZERO PERIOD POSSIBILITIES", "Academic Guide Link"],
+    },
+    '10th Grade': {
+        ENGLISH: ["AP Seminar", "English, Grade 10", "English, Grade 10, Adv Level"],
+        'SOCIAL STUDIES': ["United States History I: Gr 10", "United States History I: Adv Gr 10*", "UNITED STATES HISTORY I (HIS 201) / UNITED STATES HISTORY II (HIS 202)"],
+        SCIENCE: ["Biology", "Chemistry*", "Chemistry, Advanced Level*", "Physical Science"],
+        MATHEMATICS: ["Algebra I w/ Probability", "Algebra II w/Statistics, Advanced*", "Algebra I w/ Probability LAB (Elective class- does not count as a math)"],
+        'WORLD LANGUAGES': ["Spanish 1", "Spanish 2", "Spanish 3"],
+        'FINE ARTS': ["Chamber Choir*/**", "Color Guard*/** (Fall Only)", "Concert Band (Spring)*/**", "Concert Chorus", "Ensemble*/**(Girls Only)", "Guitar I (1 sem)*", "Instrumental Tech */**", "Journalism 1***", "Marching Band (Fall)*/**", "Performers (Boys Only)*/**", "Theatre, Theatre I", "Visual Arts I*", "Visual Arts II*", "Vocal Tech"],
+        'CAREER/TECHNICAL': ["Archit. Computer Aided Design */****(1 Sem)", "Business Software Applications I* (CP-A)", "Business Software Applications II", "Civil Air Patrol I", "Civil Air Patrol II", "Computer Aided Design*/**** (1 Sem)", "Computer Science Principles, AP*", "Cybersecurity- PLTW*", "Education and Training Foundations* (CP-A)", "Engineering Essentials (CP-A)*", "Exploring Computer Science (CP-A)", "Family and Consumer Science", "Fundamentals of Agriscience* (CP-A)", "Intermediate Agriscience", "Intro to Law and American Legal Systems (CP-A)", "Introduction to Engineering Design -PLTW*/****", "Introduction to Manufacturing/Workforce Readiness(CP-A", "Marketing Principles* /****(CP-A)", "Personal Finance*", "Sports and Entertainment Marketing Fund*", "Teaching I- Elementary*", "Teaching I- Secondary*", "Therapeutic Services"],
+        ELECTIVES: ["ACT Prep (1 sem)", "AP Prep", "AP Research", "Driver and Traffic Safety Education (1 sem)", "eSports", "Health Education (1 sem)", "Personal Fitness (if completed PE)", "Psychology, AP*/****", "Survey of the New Testament ****(Spring)", "Survey of the Old Testament ****(Fall)", "Yearbook***", "PE/ATHLETICS FOR FEMALES", "PE/ATHLETICS FOR MALES", "VIRTUAL/ACCESS", "ZERO PERIOD POSSIBILITIES", "SUMMER SCHOOL OPTIONS"],
+    },
+    '11th Grade': {
+        ENGLISH: ["English, Grade 11", "English, Language and Comp, AP*/****"],
+        'SOCIAL STUDIES': ["United States History II: Gr 11", "United States History, AP*", "UNITED STATES HISTORY I (HIS 201) / UNITED STATES HISTORY II (HIS 202)"],
+        SCIENCE: ["Biology, AP */****", "Chemistry, AP*/**** (2 Periods with Lab)", "Chemistry*", "Computer Science A, AP*", "Computer Science Principles, AP*", "Cybersecurity-PLTW*", "Earth and Space Science", "Environmental Science", "Environmental Science, AP", "Forensic Science & Crime Sc Invest*", "Human Anatomy and Physiology, Adv*/****", "Human Body Struct. & Functions*", "Introduction to Computer Science- TEALS*", "Physics, Advanced*", "Physics, AP*", "Principles of Engineering*"],
+        MATHEMATICS: ["Algebra II with Statistics", "Precalculus*/****", "Precalculus, AP*/****", "MATH LAB ELECTIVE / Algebra II with Statistics Lab"],
+        'WORLD LANGUAGES': ["Spanish 1", "Spanish 2", "Spanish 3", "Spanish 4"],
+        'FINE ARTS': ["Chamber Choir*/**", "Color Guard*/** (Fall Only)", "Concert Band (Spring)*/**", "Concert Chorus *", "Ensemble*/**(Girls Only)", "Guitar I or II (1 sem)*", "Instrumental Tech */**", "Journalism 1***", "Marching Band (Fall)*/**", "Music Theory, AP*/***", "Performers*/**", "Studio Art*/**", "Theatre, Theatre I*", "Visual Arts I*", "Visual Arts II*", "Visual Arts III", "Vocal Tech"],
+        'CAREER/TECHNICAL': ["Advanced Agriscience**", "Archit. Computer Aided Design */****(1 Sem)", "Business Software Applications I (CP-A)", "Business Software Applications II*", "Civil Air Patrol I", "Civil Air Patrol II", "Civil Air Patrol III", "Computer Aided Design*/**** (1 Sem", "Computer Science A, AP*", "Computer Science Principles, AP", "Cooperative Ed WBL (1 Hr)*", "Cooperative Ed WBL (2 Hrs)*", "CTE Lab in AFNR/ Landscaping", "CTE Lab in BMA*/***", "CTE Lab in Education and Training", "CTE Lab in Finance*/***", "CTE Lab in Health Science", "Cybersecurity- PLTW*", "Diagnostic Services", "Digital Media Design*", "Education and Training Foundations (CP-A)*", "Engineering Essentials (CP-A)*", "Family and Consumer Science", "Forensic Science and Crime Sc Invest*", "Foundations of Health Science", "Fundamentals of Agriscience (CP-A)", "Human Body Struct. & Funct.*", "Intermediate Agriscience*", "Intro to Computer Science- TEALS*", "Intro to Law and American Legal Systems", "Introduction to Engineering Design- PLTW*/****", "Introduction to Manufacturing/Workforce Readiness (CP-A)", "Marketing Principles*/****(CP-A)", "Personal Finance", "Principles of Engineering-PLTW*", "Sports and Entertainment Marketing Fund", "Sports Medicine Fundamentals*", "Teaching I- Elementary*", "Teaching I- Secondary*", "Teaching II*", "Therapeutic Services"],
+        ELECTIVES: ["ACT Prep (1 sem)", "AP Prep", "AP Research", "Driver and Traffic Safety Education (1 sem)", "eSports", "Health Education (1 sem)", "IRC Peer Aide***", "Personal Fitness (if completed PE)", "Psychology, AP*/****", "Survey of the New Testament ****(Spring)", "Survey of the Old Testament ****(Fall)", "Yearbook***", "PE/ATHLETICS FOR FEMALES", "PE/ATHLETICS FOR MALES", "VIRTUAL/ACCESS", "ZERO PERIOD POSSIBILITIES", "SUMMER SCHOOL OPTIONS"],
+    },
+    '12th Grade': {
+        ENGLISH: ["English, Grade 12", "English, Literature and Comp, AP */****"],
+        'SOCIAL STUDIES': ["Economics CP-B (1 sem)", "United States Gov (1 sem)", "Economics CP-B, AP (1 sem)*", "United States Gov and Politics, AP (1 sem)*"],
+        SCIENCE: ["Biology, AP */****", "Chemistry, AP*/**** (2 Periods with Lab)", "Chemistry*", "Computer Science A, AP*", "Computer Science Principles, AP*", "Cybersecurity-PLTW*", "Earth and Space Science", "Environmental Science", "Environmental Science, AP*", "Forensic Science & Crime Sc Invest*", "Human Anatomy and Physiology, Adv*/****", "Human Body Struct. & Functions*", "Introduction to Computer Science- TEALS*", "Physics, Advanced*", "Physics, AP*", "Principles of Engineering*"],
+        MATHEMATICS: ["Calculus AB, AP****", "Computer Science Principles, AP*", "Intro to Computer Science- TEALS*", "Introduction to Engineering Design*/****", "Mathematical Modeling", "Precalculus, AP*/****", "Precalculus*/****", "Statistics, AP*/****"],
+        'WORLD LANGUAGES': ["Spanish 1", "Spanish 2", "Spanish 3", "Spanish 4"],
+        'FINE ARTS': ["2-D Art Design, AP*/**", "Chamber Choir*/**", "Color Guard*/** (Fall Only)", "Concert Band (Spring)*/**", "Concert Chorus*", "Ensemble*/** (Girls Only)", "Guitar I or II (1 sem)*", "Instrumental Tech*/**", "Journalism 1***", "Marching Band (Fall)*/**", "Music Theory, AP*", "Performers*/**", "Studio Art*/**", "Theatre, Theatre*", "Visual Arts I", "Visual Arts II*", "Visual Arts III*", "Visual Arts IV", "Vocal Tech"],
+        'CAREER/TECHNICAL': ["Advanced Agriscience", "Applications of Engineering and Technology", "Applied Agriscience*", "Archit. Computer Aided Design */****(1 Sem)", "Banking and Financial Services", "Business Software Applications I* (CP-A)", "Business Software Applications II*", "Civil Air Patrol I", "Civil Air Patrol II", "Civil Air Patrol III", "Civil Air Patrol IV", "Computer Science A, AP*", "Computer Science Principles, AP*", "Cooperative Ed WBL (1 Hr)*", "Cooperative Ed WBL (2 Hrs)*", "Cooperative Ed WBL (3 Hrs)*", "CTE Lab in AFNR/ Landscaping", "CTE Lab in BMA */***", "CTE Lab in Education and Training", "CTE Lab in Finance*/***", "CTE Lab in Health Science", "Cybersecurity- PLTW*", "Digital Media Design*", "Education and Train. Internship* (2 Hrs)", "Education and Training Foundations* (CP-A)", "Engineering Essentials (CP-A)", "Family and Consumer Science", "Forensic Science & Crime Sc Invest", "Fundamentals of Agriscience* (CP-A)", "Health Science Internship (2 hours)*/***/****", "Human Body Struct. & Funct.*", "Intermediate Agriscience*", "Intro to Computer Science- TEALS*", "Intro to Law and American Legal Systems (CP-A)", "Introduction to Engineering Design- PLTW*/****", "Introduction to Manufacturing/Workforce Readiness (CP-A)*", "Marketing Principles*/**** (CP-A)", "Personal Finance*", "Pharmacy Technician*", "Principles of Engineering- PLTW*", "Sports and Entertainment Marketing Fund", "Sports Medicine Fundamentals", "Teaching I- Elementary*", "Teaching I- Secondary*", "Teaching II*"],
+        ELECTIVES: ["ACT Prep (1 sem)", "AP Prep", "AP Research", "Driver and Traffic Safety Education (1 sem)", "eSports", "Health Education (1 sem)", "IRC Peer Aide***", "Personal Fitness (if completed PE)", "Psychology, AP*/****", "Survey of the New Testament ****(Spring)", "Survey of the Old Testament ****(Fall)", "Yearbook***", "PE/ATHLETICS FOR FEMALES", "PE/ATHLETICS FOR MALES", "Non-Credit Course (Needs Admin. approval)", "VIRTUAL/ACCESS", "ZERO PERIOD POSSIBILITIES", "SUMMER SCHOOL OPTIONS"],
+    }
+};
+
+const GRADE_LEVELS = ['9th Grade', '10th Grade', '11th Grade', '12th Grade'];
+const FOUR_YEAR_SUBJECTS = ["English", "Social Studies", "Math", "Science", "Health/LIFE Physical Education/Electives", "Career Preparedness / Electives", "Career Tech and/or World Language and/or Arts/ Electives"];
+
+// Main Application Component
+const App = () => {
+    const [studentName, setStudentName] = useState('');
+    const [gradeLevel, setGradeLevel] = useState(GRADE_LEVELS[0]);
+    const [activeTab, setActiveTab] = useState('manual'); // 'manual' or 'ocr'
+    const [selectedFile, setSelectedFile] = useState(null);
+    const [ocrResult, setOcrResult] = useState(null);
+    const [isLoading, setIsLoading] = useState(false);
+    const [message, setMessage] = useState('');
+    const [selectedCourses, setSelectedCourses] = useState({
+        English: '', Math: '', 'Social Studies': '', Science: '',
+        Elective1: '', Elective2: '', Elective3: '', AltElective1: '', AltElective2: ''
+    });
+
+    const initialFourYearPlan = useMemo(() => {
+        const plan = {};
+        FOUR_YEAR_SUBJECTS.forEach(subject => {
+            plan[subject] = { '9th Grade': '', '10th Grade': '', '11th Grade': '', '12th Grade': '', 'Summer School': '' };
+        });
+        return plan;
+    }, []);
+
+    const [fourYearPlan, setFourYearPlan] = useState(initialFourYearPlan);
+
+    // --- Course Data Memoization ---
+    const availableCourses = useMemo(() => COURSE_DATA[gradeLevel] || {}, [gradeLevel]);
+
+    // --- Handlers ---
+
+    const handleCourseSelect = (key, value) => {
+        setSelectedCourses(prev => ({ ...prev, [key]: value }));
+        setOcrResult(null); // Clear OCR result if manual changes are made
+    };
+
+    const handleFileChange = (event) => {
+        setSelectedFile(event.target.files[0]);
+        setOcrResult(null);
+        setMessage('');
+    };
+
+    /**
+     * Attempts to map the extracted course names (strings) from the LLM response
+     * into the structured state object (selectedCourses).
+     */
+    const mapExtractedCourses = (extractedCourses) => {
+        const mapped = {};
+        // Use a set to get all unique course names across all categories for the current grade
+        const allCourseNames = new Set(Object.values(COURSE_DATA[gradeLevel]).flat());
         
-        // Firestore paths
-        const DATA_COLLECTION = 'schedule_plans';
-        const DATA_DOCUMENT = 'main_plan';
-        
-        // Global variables provided by the environment
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        let coreKeys = ['English', 'Math', 'Social Studies', 'Science'];
+        let electiveKeys = ['Elective1', 'Elective2', 'Elective3', 'AltElective1', 'AltElective2'];
 
-        let db = null;
-        let auth = null;
-        let app = null;
-        let userId = 'anonymous';
-        let isAuthReady = false;
-        let currentPlanData = {}; // Cache for currently loaded/edited plan data
-
-        if (firebaseConfig) {
-            app = initializeApp(firebaseConfig);
-            db = getFirestore(app);
-            auth = getAuth(app);
-            
-            // Log in using the custom token or anonymously
-            onAuthStateChanged(auth, async (user) => {
-                if (user) {
-                    userId = user.uid;
-                } else {
-                    try {
-                        if (initialAuthToken) {
-                            await signInWithCustomToken(auth, initialAuthToken);
-                        } else {
-                            await signInAnonymously(auth);
-                        }
-                        userId = auth.currentUser?.uid || crypto.randomUUID();
-                    } catch (error) {
-                        console.error("Firebase Sign-in Failed:", error);
-                    }
-                }
-                isAuthReady = true;
-                console.log("Firebase Auth Ready. User ID:", userId);
-                document.getElementById('currentUserId').textContent = userId;
-                document.getElementById('userIdDisplay').classList.remove('hidden');
+        // Simple mapping based on subject type and slot availability
+        extractedCourses.forEach(course => {
+            // Check if the extracted course is a valid course name in the data set
+            if (allCourseNames.has(course)) {
                 
-                // Start loading/listening to data after auth is ready
-                loadDataFromFirestore();
-            });
-        }
-
-        // --- Master Course List (Categorized for Dropdowns) ---
-        const MASTER_COURSES = {
-            "Select Course": ["", "--- Select a course ---"],
-            "English": [
-                "English 9", "Adv English 9", "English 10", "Adv English 10", "English 11", "AP English 11", 
-                "English 12", "AP English 12", "ENG 101/Lit Comp", "ENG 102/Lit Comp", "ENG 261/262", "Journalism 1"
-            ],
-            "Math": [
-                "Algebra I", "Geometry", "Adv Geometry", "Algebra II", "Adv Alg. II", "PreCalculus", 
-                "AP PreCalculus", "AP Calculus AB", "AP Calculus BC", "AP Statistics", "Career Math", "Finite Math", "Mathematical Modeling"
-            ],
-            "Science": [
-                "Biology", "Adv Biology", "Physical Science", "Chemistry", "Adv Chemistry", "Physics", "Adv Physics", 
-                "AP Physics 1", "Earth and Space Science", "Environmental Science", "AP Environmental Science", 
-                "Human Anatomy and Physiology", "Adv Human Anatomy", "Human Body Structures & Functions", 
-                "Forensic Science & Crime Sc Invest", "AP Biology", "AP Chemistry"
-            ],
-            "Social Studies": [
-                "World History", "AP World History", "US History 10", "Adv US History 10", "US History 11", 
-                "AP US History 11", "Economics (1 sem)", "AP Economics (1 sem)", "Government (1 sem)", 
-                "AP Government (1 sem)", "HIS 201", "HIS 202"
-            ],
-            "Technology & Engineering": [
-                "Introduction to Computer Science", "Computer Science Principles", "AP Computer Science Principles", 
-                "Computer Science A", "AP Computer Science A", "Cybersecurity-PLTW", "Principles of Engineering", 
-                "Introduction to Engineering Design", "Applications of Engineering"
-            ],
-            "World Language": ["Spanish 1", "Spanish 2", "Spanish 3", "Spanish 4"],
-            "Physical Education": [
-                "Health (1/2 credit)", 
-                "Beg. Kin. (1 credit)", 
-                "Found. of Health Sci",
-                "Other P.E. Elective"
-            ],
-            "Fine Arts & Electives": [
-                "2-D Art Design, AP", "Chamber Choir", "Color Guard (Fall Only)", "Concert Band (Spring)", 
-                "Concert Chorus", "Ensemble (Girls Only)", "Guitar I or II (1 sem)", "Instrumental Tech", "Marching Band (Fall)", 
-                "Music Theory, AP", "Performers", "Studio Art", "Theatre", "Visual Arts I", 
-                "Career Prep A", "CAP/Marching Band", "Civics", "Literacy", "Other Elective"
-            ]
-        };
-
-        // --- Definition for the 7 fixed slots in the 4-Year Plan ---
-        const PLAN_SLOTS_DEFINITION = [
-            { name: "English", categories: ["English"] },
-            { name: "Math", categories: ["Math"] },
-            { name: "Science", categories: ["Science"] },
-            { name: "Social Studies", categories: ["Social Studies"] },
-            { name: "Physical Education (P.E.)", categories: ["Physical Education"] }, 
-            { name: "Career Tech / World Lang", categories: ["Technology & Engineering", "World Language"] }, 
-            { name: "Fine Arts / Other Elective", categories: ["Fine Arts & Electives"] }
-        ];
-
-        let finalDataCache = null;
-
-        // --- FIREBASE DATA HANDLING ---
-
-        function getPlanDocRef() {
-            if (!db || !isAuthReady || !userId) return null;
-            // Private data path: /artifacts/{appId}/users/{userId}/schedule_plans/main_plan
-            return doc(db, `artifacts/${appId}/users/${userId}/${DATA_COLLECTION}/${DATA_DOCUMENT}`);
-        }
-
-        /** Saves the current state of the form and cache to Firestore */
-        async function saveDataToFirestore() {
-            const planRef = getPlanDocRef();
-            if (!planRef) return;
-
-            // 1. Get Student Info from Form (always save form values)
-            const formInputs = document.getElementById('digitalForm');
-            const studentName = formInputs.querySelector('#studentName').value.trim();
-            const email = formInputs.querySelector('#recipientEmail').value;
-            const gradeLevel = formInputs.querySelector('#gradeLevel').value;
-            const diploma = formInputs.querySelector('input[name="diploma"]:checked')?.value || 'Standard';
-            
-            // 2. Get Current Year Schedule Data
-            const currentCourseSelects = formInputs.querySelectorAll('.current-course-select');
-            const currentCourses = Array.from(currentCourseSelects).map(select => select.value);
-
-            // 3. Get 4-Year Plan Data
-            const fourYearPlan = {};
-            const planSections = document.querySelectorAll('.plan-section');
-            planSections.forEach(section => {
-                const year = section.getAttribute('data-year');
-                const courseSelects = section.querySelectorAll('.plan-course-select');
-                fourYearPlan[year] = Array.from(courseSelects).map(select => select.value);
-            });
-
-            const dataToSave = {
-                studentName,
-                email,
-                gradeLevel,
-                diploma,
-                currentCourses,
-                fourYearPlan,
-                ocrResult: currentPlanData.ocrResult || null, // Keep existing OCR result if present
-                rawText: currentPlanData.rawText || null, // Keep existing raw text
-                lastSaved: new Date().toISOString()
-            };
-
-            try {
-                // Ensure form changes trigger an update to the summary
-                compileAndDisplayData(false); // Passive compile
-                
-                await setDoc(planRef, dataToSave, { merge: true });
-                console.log("Plan data saved successfully.");
-                document.getElementById('statusMessage').textContent = "Data saved automatically.";
-
-            } catch (error) {
-                console.error("Error saving data to Firestore:", error);
-                document.getElementById('statusMessage').textContent = "Error saving data. Check console.";
-            }
-        }
-        
-        /** Loads and listens for real-time updates to the plan data from Firestore */
-        function loadDataFromFirestore() {
-            const planRef = getPlanDocRef();
-            if (!planRef) return;
-            
-            onSnapshot(planRef, (docSnap) => {
-                if (docSnap.exists()) {
-                    currentPlanData = docSnap.data();
-                    console.log("Loaded data:", currentPlanData);
-                    renderLoadedData(currentPlanData);
-                } else {
-                    console.log("No existing plan data found. Starting fresh.");
+                // 1. Try to map to core subjects
+                if (coreKeys.length > 0) {
+                    const subject = coreKeys.shift();
+                    mapped[subject] = course;
+                } 
+                // 2. If core slots are filled or course doesn't fit, map to electives
+                else if (electiveKeys.length > 0) {
+                    const electiveKey = electiveKeys.shift();
+                    mapped[electiveKey] = course;
                 }
-            }, (error) => {
-                console.error("Error listening to Firestore snapshot:", error);
-            });
+            }
+        });
+
+        setSelectedCourses(prev => ({ 
+            ...prev, 
+            ...mapped 
+        }));
+    };
+
+    /**
+     * Calls the Gemini API to perform OCR and structured data extraction.
+     */
+    const handleOCRSubmit = async () => {
+        if (!selectedFile) {
+            setMessage('Please select a PDF or image file first.');
+            return;
         }
+
+        setIsLoading(true);
+        setMessage(`Processing ${selectedFile.name} with AI...`);
         
-        /** Renders the loaded Firestore data back into the HTML form */
-        function renderLoadedData(data) {
-            const formInputs = document.getElementById('digitalForm');
-
-            // 1. Student Info
-            formInputs.querySelector('#studentName').value = data.studentName || '';
-            formInputs.querySelector('#recipientEmail').value = data.email || '';
-            formInputs.querySelector('#gradeLevel').value = data.gradeLevel || '9';
-            formInputs.querySelectorAll('input[name="diploma"]').forEach(radio => {
-                radio.checked = radio.value === data.diploma;
-            });
-
-            // 2. Current Year Schedule
-            const currentCourseSelects = formInputs.querySelectorAll('.current-course-select');
-            if (data.currentCourses) {
-                currentCourseSelects.forEach((select, index) => {
-                    select.value = data.currentCourses[index] || '';
-                });
-            }
-
-            // 3. 4-Year Plan Data
-            if (data.fourYearPlan) {
-                const planSections = document.querySelectorAll('.plan-section');
-                planSections.forEach(section => {
-                    const year = section.getAttribute('data-year');
-                    const courseSelects = section.querySelectorAll('.plan-course-select');
-                    if (data.fourYearPlan[year]) {
-                        courseSelects.forEach((select, index) => {
-                            select.value = data.fourYearPlan[year][index] || '';
-                        });
-                    }
-                });
-            }
+        try {
+            const base64Data = await fileToBase64(selectedFile);
             
-            // 4. Raw Text Display
-            document.getElementById('ocrRawTextOutput').textContent = data.rawText || 'No schedule card has been scanned yet.';
-
-            // Re-compile if there's loaded data
-            compileAndDisplayData(false); // Passive compile
-        }
-
-        // --- GEMINI OCR FUNCTIONS ---
-
-        /** Converts a File object to a Base64 string */
-        function fetchAndConvertToBase64(file) {
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => {
-                    // Extract base64 data (remove the prefix 'data:image/jpeg;base64,')
-                    const base64String = reader.result.split(',')[1];
-                    resolve(base64String);
-                };
-                reader.onerror = error => reject(error);
-                reader.readAsDataURL(file);
-            });
-        }
-
-        /** Calls the Gemini API for image recognition/OCR */
-        async function callGeminiAPI(base64ImageData) {
-            if (!API_KEY) {
-                // This check should already be handled by processOCRData, but included for completeness
-                return { error: true, message: "API key is missing in the code." }; 
-            }
-
-            const prompt = `You are a scheduling assistant. Extract the following information from the schedule card image: Student Name, Current Grade Level (9, 10, 11, or 12), Diploma Type (Standard, Honors, or Work Force), and a list of all course selections.
+            const systemPrompt = `You are a precise data extraction tool for school counseling. Analyze the uploaded school registration form (which is for ${gradeLevel} students). 
+                                  Your task is to extract only the courses explicitly selected or written by the student for the upcoming school year. 
+                                  Return the output as a single JSON object. The keys must be 'selectedCourses' and the value must be an array of strings containing only the extracted course names. 
+                                  Do not include any preamble, commentary, or markdown formatting outside of the JSON object itself.`;
             
-            First, output the raw, unparsed text from the image under the key 'rawText'.
-            Second, output the structured data as a JSON object under the key 'parsedData'. The 'parsedData' object should contain:
-            - "studentName": "string"
-            - "gradeLevel": "string" (e.g., "9", "10", "11", "12")
-            - "diploma": "string" (e.g., "Standard", "Honors", "Work Force")
-            - "currentCourses": ["string", "string", ...] (Extracted course names)
-
-            Do not include any courses that are not explicitly selected or are marked as "Other:".
-
-            Output JSON Schema:
-            {
-                "rawText": "string",
-                "parsedData": {
-                    "studentName": "string",
-                    "gradeLevel": "string",
-                    "diploma": "string",
-                    "currentCourses": ["string", "string", ...]
-                }
-            }`;
-
-            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`;
             const payload = {
                 contents: [{
+                    role: "user",
                     parts: [
-                        { text: prompt },
+                        { text: `Extract the selected courses from this image/document. The student is enrolling in the ${gradeLevel} curriculum.` },
                         {
                             inlineData: {
-                                // Assuming image/jpeg. Change if the file handler changes mime type.
-                                mimeType: 'image/jpeg', 
-                                data: base64ImageData
+                                mimeType: selectedFile.type,
+                                data: base64Data
                             }
                         }
                     ]
@@ -299,617 +213,425 @@
                     responseSchema: {
                         type: "OBJECT",
                         properties: {
-                            rawText: { type: "STRING" },
-                            parsedData: { 
-                                type: "OBJECT",
-                                properties: {
-                                    studentName: { type: "STRING" },
-                                    gradeLevel: { type: "STRING" },
-                                    diploma: { type: "STRING" },
-                                    currentCourses: { type: "ARRAY", items: { type: "STRING" } }
-                                }
+                            selectedCourses: {
+                                type: "ARRAY",
+                                description: "List of all selected course names as strings.",
+                                items: { type: "STRING" }
                             }
                         }
                     }
+                },
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
                 }
             };
 
-            // Use exponential backoff for API calls
-            let attempts = 0;
-            const maxAttempts = 3;
-            while (attempts < maxAttempts) {
-                try {
-                    const response = await fetch(apiUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                    });
+            // --- API KEY IMPLEMENTATION ---
+            // Your provided key is inserted here to enable the OCR feature.
+            const apiKey = "AIzaSyD73nlmmDQlsWo-2mxUvszjXgMtQ7VMu64"; 
+            // -----------------------------
 
-                    if (!response.ok) {
-                        const errorBody = await response.json();
-                        throw new Error(`API Error: ${response.status} - ${JSON.stringify(errorBody)}`);
-                    }
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
 
-                    const result = await response.json();
-                    const jsonString = result.candidates?.[0]?.content?.parts?.[0]?.text;
-                    if (!jsonString) {
-                         throw new Error("API returned an empty or malformed response.");
-                    }
-                    
-                    return { success: true, data: JSON.parse(jsonString) };
-
-                } catch (error) {
-                    // Do not log retries as errors, but log final failure
-                    attempts++;
-                    if (attempts < maxAttempts) {
-                        const delay = Math.pow(2, attempts) * 1000;
-                        await new Promise(resolve => setTimeout(resolve, delay));
-                    } else {
-                        console.error(`Final API attempt failed after ${maxAttempts} tries:`, error);
-                        return { error: true, message: "All API attempts failed. Check your key and network connection.", details: error.message };
-                    }
-                }
-            }
-        }
-        
-        /** Handles the OCR process after file selection */
-        async function processOCRData() {
-            const fileInput = document.getElementById('fileInput');
-            const statusDiv = document.getElementById('statusMessage');
-            const scanButton = document.getElementById('scanButton');
-            
-            const file = fileInput.files[0];
-            if (!file) {
-                statusDiv.textContent = "Please select a schedule card image file first.";
-                return;
-            }
-
-            if (!file.type.startsWith('image/')) {
-                statusDiv.textContent = "Error: Please upload a valid image file (e.g., JPEG, PNG).";
-                return;
-            }
-            
-            if (!API_KEY) {
-                statusDiv.innerHTML = `<span class="text-red-600 font-semibold">Error:</span> The Gemini API Key is missing in the code. Please add your key to enable the scanner.`;
-                return;
-            }
-
-
-            statusDiv.innerHTML = `<span class="text-blue-600 font-semibold">Scanning card... Uploading image and waiting for AI response.</span>`;
-            scanButton.disabled = true;
-            document.getElementById('ocrRawTextOutput').textContent = 'Scanning...';
-
-            try {
-                // 1. Convert image to Base64
-                const base64Data = await fetchAndConvertToBase64(file);
-                
-                // 2. Call Gemini API
-                const apiResult = await callGeminiAPI(base64Data);
-
-                if (apiResult.error) {
-                    statusDiv.innerHTML = `<span class="text-red-600 font-semibold">OCR Failed:</span> ${apiResult.message}. Details: ${apiResult.details}`;
-                    return;
-                }
-
-                // 3. Process the extracted data
-                const rawText = apiResult.data.rawText;
-                const extractedData = apiResult.data.parsedData;
-                
-                // Store the extracted data in the global cache and update form
-                currentPlanData.ocrResult = extractedData;
-                currentPlanData.rawText = rawText;
-                
-                applyOCRToForm(extractedData);
-                
-                // Display raw text
-                document.getElementById('ocrRawTextOutput').textContent = rawText;
-                
-                // Saving is triggered by applyOCRToForm
-                // saveDataToFirestore(); 
-
-                statusDiv.innerHTML = `<span class="text-green-600 font-semibold">Scan Complete!</span> Data loaded into the form for review and saved.`;
-
-            } catch (error) {
-                console.error("OCR Process Error:", error);
-                statusDiv.innerHTML = `<span class="text-red-600 font-semibold">An unexpected error occurred:</span> ${error.message}.`;
-            } finally {
-                scanButton.disabled = false;
-            }
-        }
-        
-        /** Applies OCR results to the digital form fields */
-        function applyOCRToForm(data) {
-            const formInputs = document.getElementById('digitalForm');
-            
-            // 1. Student Info
-            formInputs.querySelector('#studentName').value = data.studentName || '';
-            
-            const gradeSelect = formInputs.querySelector('#gradeLevel');
-            // Try to match grade level to a valid option
-            const gradeMatch = (data.gradeLevel || '').match(/\d+/);
-            const standardizedGrade = gradeMatch ? gradeMatch[0] : null;
-            if (standardizedGrade && Array.from(gradeSelect.options).some(opt => opt.value === standardizedGrade)) {
-                gradeSelect.value = standardizedGrade;
-            }
-            
-            const diplomaRadios = formInputs.querySelectorAll('input[name="diploma"]');
-            diplomaRadios.forEach(radio => {
-                const diplomaText = (data.diploma || '').toLowerCase();
-                const radioValue = radio.value.toLowerCase();
-                // Simple keyword matching for diploma type
-                if (diplomaText.includes(radioValue) || 
-                    (radioValue === 'work force' && diplomaText.includes('work')) ||
-                    (radioValue === 'honors' && (diplomaText.includes('honors') || diplomaText.includes('adv'))) 
-                ) {
-                    radio.checked = true;
-                }
+            const response = await fetchWithExponentialBackoff(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
             });
 
-            // 2. Current Year Courses
-            const currentCourseSelects = formInputs.querySelectorAll('.current-course-select');
+            const jsonString = response.candidates?.[0]?.content?.parts?.[0]?.text;
             
-            if (data.currentCourses) {
-                // First, reset all dropdowns
-                currentCourseSelects.forEach(select => select.value = '');
-                
-                // Then, attempt to match extracted courses to dropdowns
-                data.currentCourses.forEach((courseName, index) => {
-                    if (index < currentCourseSelects.length) {
-                        const select = currentCourseSelects[index];
-                        // Find the closest match in the dropdown options
-                        const courseMatch = Array.from(select.options).find(opt => 
-                            opt.value.toLowerCase().includes(courseName.toLowerCase())
-                        );
-                        if (courseMatch) {
-                            select.value = courseMatch.value;
-                        }
+            if (!jsonString) throw new Error("AI failed to return structured course data.");
+
+            const parsedJson = JSON.parse(jsonString);
+            const extractedCourses = parsedJson.selectedCourses || [];
+
+            if (extractedCourses.length > 0) {
+                mapExtractedCourses(extractedCourses);
+                setMessage(`Successfully extracted ${extractedCourses.length} courses. Please review the selections below.`);
+                setOcrResult({ success: true });
+            } else {
+                setMessage('The AI could not find any selected courses in the document. Please try a clearer image or use manual entry.');
+                setOcrResult({ success: false });
+            }
+
+        } catch (error) {
+            console.error("OCR/API Error:", error);
+            setMessage('Error during course extraction. Please check the file and try again. Use manual entry if the problem persists.');
+            setOcrResult({ success: false });
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleFourYearPlanChange = (subject, year, course) => {
+        setFourYearPlan(prev => ({
+            ...prev,
+            [subject]: {
+                ...prev[subject],
+                [year]: course
+            }
+        }));
+    };
+
+    /**
+     * Structures the application state into a flattened object for Formspree submission.
+     */
+    const formatDataForFormspree = () => {
+        const formData = {
+            'student-name': studentName,
+            'current-grade': gradeLevel,
+            'submission-date': new Date().toLocaleString(),
+        };
+
+        // 1. Next Year's Courses
+        let nextYearCoursesSummary = '2025-2026 Courses:\n';
+        Object.entries(selectedCourses).forEach(([key, value]) => {
+            if (value) {
+                // Use a standard field name for Formspree
+                formData[`next-year-course-${key.replace(' ', '-').toLowerCase()}`] = value;
+                nextYearCoursesSummary += `  - ${key}: ${value}\n`;
+            }
+        });
+
+        // 2. Four Year Plan
+        let planSummary = 'Four-Year Plan Overview:\n';
+        FOUR_YEAR_SUBJECTS.forEach(subject => {
+            const safeSubjectKey = subject.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+            planSummary += `${subject}:\n`;
+            
+            const currentSubjectPlan = fourYearPlan[subject];
+            if (currentSubjectPlan) {
+                Object.entries(currentSubjectPlan).forEach(([year, course]) => {
+                    // Use a unique field name for each cell in the 4-year plan grid
+                    const safeYearKey = year.replace(' ', '-').toLowerCase();
+                    if (course) {
+                        formData[`plan-${safeSubjectKey}-${safeYearKey}`] = course;
+                    } else {
+                        // Include empty fields so the structure is consistent in the email
+                        formData[`plan-${safeSubjectKey}-${safeYearKey}`] = '[Not Selected]';
                     }
+                    planSummary += `  - ${year}: ${course || '[Not Selected]'}\n`;
                 });
             }
-            
-            // Manually trigger saving after applying OCR data to ensure data persists.
-            saveDataToFirestore();
+        });
+        
+        // Include a readable summary text field for the email body in Formspree
+        formData['full-course-plan-summary'] = `*** STUDENT INFORMATION ***\nName: ${studentName}\nGrade Level: ${gradeLevel}\n\n*** COURSE SELECTIONS ***\n${nextYearCoursesSummary}\n\n*** FOUR-YEAR PLAN OVERVIEW ***\n${planSummary}`;
+
+
+        return formData;
+    };
+
+
+    /**
+     * Sends the data to the Formspree endpoint.
+     */
+    const handleSubmit = async () => {
+        if (!studentName) {
+            console.error('Submission Error: Please enter the student\'s name before submitting.');
+            setMessage('Please enter the student\'s name before submitting.');
+            return;
         }
-        // --- END GEMINI OCR FUNCTIONS ---
 
+        setIsLoading(true);
+        setMessage('Submitting course plan...');
 
-        /** Main function to compile all data and display. */
-        async function compileAndDisplayData(isManualTrigger = true) {
-            const formInputs = document.getElementById('digitalForm');
-            const outputDiv = document.getElementById('extractionOutput');
-            const statusDiv = document.getElementById('statusMessage');
-            const sendButton = document.getElementById('sendButton');
-            
-            if (isManualTrigger) {
-                outputDiv.innerHTML = '';
-                sendButton.disabled = true;
-                statusDiv.textContent = "Compiling digital data...";
-            }
+        const formData = formatDataForFormspree();
 
-
-            let finalData = {};
-            
-            // 1. Get Student Info
-            const studentName = formInputs.querySelector('#studentName').value.trim();
-            const email = formInputs.querySelector('#recipientEmail').value;
-            const diploma = formInputs.querySelector('input[name="diploma"]:checked')?.value || 'N/A';
-
-            // 2. Get Current Year Schedule Data
-            const currentYear = formInputs.querySelector('#gradeLevel').value;
-            const currentCourseSelects = formInputs.querySelectorAll('.current-course-select');
-            const currentCourses = Array.from(currentCourseSelects)
-                .map(select => select.value)
-                .filter(course => course !== '');
-
-            // 3. Get 4-Year Plan Data (Now using fixed category slots)
-            const fourYearPlan = {};
-            const planSections = document.querySelectorAll('.plan-section');
-            planSections.forEach(section => {
-                const year = section.getAttribute('data-year');
-                const courseSelects = section.querySelectorAll('.plan-course-select');
-                // Store the selections by year
-                fourYearPlan[year] = Array.from(courseSelects)
-                    .map(select => {
-                        // The label is stored as the previousElementSibling (the <label> tag)
-                        const label = select.previousElementSibling.textContent; 
-                        return `${label}: ${select.value}`; // Store as "Category: Course Name"
-                    })
-                    .filter(item => !item.endsWith(': ')); // Filter out empty selections
+        try {
+            const response = await fetch(FORMSPREE_ENDPOINT, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                body: JSON.stringify(formData)
             });
-            
-            const isDigitalComplete = (studentName && email && currentCourses.length > 0);
 
-            finalData.email = email;
-            finalData.Digital_Input = { studentName, currentYear, diploma, currentCourses, fourYearPlan };
-
-            // Include OCR result if it exists in the cache
-            if (currentPlanData.ocrResult) {
-                finalData.OCR_Result_Last_Scan = currentPlanData.ocrResult;
-            }
-
-            // Cache the compiled data
-            finalDataCache = finalData;
-
-            // 5. Generate Final Summary Text
-            let summaryText = `## Schedule Submission Summary for ${studentName || 'Student'}\n\n`;
-            summaryText += `**Recipient Email:** ${finalData.email || 'N/A'}\n\n`;
-
-            // Display OCR Summary if available
-            if (finalData.OCR_Result_Last_Scan) {
-                const ocr = finalData.OCR_Result_Last_Scan;
-                summaryText += `### Last OCR Scan Result (Data applied to form)\n`;
-                summaryText += `* **Name:** ${ocr.studentName || 'N/A'}\n`;
-                summaryText += `* **Grade:** ${ocr.gradeLevel || 'N/A'}\n`;
-                summaryText += `* **Courses Extracted (${ocr.currentCourses.length}):**\n`;
-                ocr.currentCourses.forEach((c, i) => summaryText += `  - ${c}\n`);
-            }
-
-
-            summaryText += `\n### 1. Current Year (${currentYear}) Digital Schedule\n`;
-            if (isDigitalComplete) {
-                summaryText += `* **Student Name:** ${finalData.Digital_Input.studentName}\n`;
-                summaryText += `* **Diploma Type:** ${finalData.Digital_Input.diploma}\n`;
-                summaryText += `* **Chosen Courses (${finalData.Digital_Input.currentCourses.length}):**\n`;
-                finalData.Digital_Input.currentCourses.forEach((c, i) => summaryText += `  - Course ${i + 1}: ${c}\n`);
+            if (response.ok) {
+                setMessage('Success! Your course plan has been submitted to the counselor. You can now close this page.');
             } else {
-                summaryText += `* **Note:** Digital form is incomplete. Please check inputs.\n`;
+                // Try to get error message from Formspree response
+                const errorData = await response.json();
+                const errorMessage = errorData.error || 'Unknown Formspree error.';
+                throw new Error(errorMessage);
             }
-
-            summaryText += `\n### 2. Digital 4-Year Plan\n`;
-            for (const year in fourYearPlan) {
-                summaryText += `* **${year}:** (${fourYearPlan[year].length} selections)\n`;
-                // Print only the selections with actual course data
-                fourYearPlan[year].forEach(c => summaryText += `  - ${c}\n`);
-            }
-
-            // 6. Display Summary and Enable Send
-            outputDiv.innerHTML = `<br>
-                <h3 class="text-lg font-semibold text-gray-800 mb-2">Final Schedule Data:</h3>
-                <div class="bg-gray-50 p-4 rounded-lg border border-gray-200 whitespace-pre-wrap text-sm">
-                    ${summaryText}
-                </div>
-            `;
-            sendButton.disabled = false;
-            if (isManualTrigger) {
-                statusDiv.textContent = "Data compiled. Review the summary and click 'Send'.";
-            }
+        } catch (error) {
+            console.error('Form Submission Error:', error);
+            setMessage(`Submission Failed: ${error.message || 'Could not connect to the submission service.'} Please double-check your Formspree code and network connection.`);
+        } finally {
+            setIsLoading(false);
         }
+    };
 
-        // --- EMAIL SENDING FUNCTION VIA MOCK API (since no real keys are available) ---
-        async function sendDataViaAPI() {
-            const statusDiv = document.getElementById('statusMessage');
-            const sendButton = document.getElementById('sendButton');
+    // --- Components ---
 
-            if (!finalDataCache) {
-                statusDiv.textContent = "Please compile the data first.";
-                return;
-            }
-
-            const recipientEmail = finalDataCache.email;
-
-            sendButton.disabled = true;
-            statusDiv.innerHTML = `<span class="text-blue-600 font-semibold">Simulating Send...</span>`;
-
-            // --- MOCK API CALL SIMULATION ---
-            await new Promise(resolve => setTimeout(resolve, 1500)); 
-            const success = recipientEmail && recipientEmail.includes('@'); // Simple check for mock success
-
-            if (success) {
-                statusDiv.innerHTML = `<br>
-                    <span class="text-green-600 font-semibold">Success!</span>
-                    The schedule data was *simulated* to be sent to
-                    <span class="font-mono bg-green-100 p-1 rounded">${recipientEmail}</span>.
-                    <br>
-                    <span class="text-sm text-gray-600">Note: Real email functionality requires a secure, deployed backend server.</span>
-                `;
-            } else {
-                 statusDiv.innerHTML = `<br>
-                    <span class="text-red-600 font-semibold">Error!</span>
-                    Failed to send email. Please ensure a valid recipient email is entered.
-                `;
-            }
-            // --- END MOCK API CALL SIMULATION ---
-            
-            sendButton.disabled = false;
-        }
-        // --- END EMAIL SENDING FUNCTION VIA MOCK API ---
-
-
-        /** Generates HTML options for a given category */
-        function getOptionsHTML(category, courses) {
-            let html = `<optgroup label="${category}">`;
-            courses.forEach(course => {
-                html += `<option value="${course}">${course}</option>`;
-            });
-            html += `</optgroup>`;
-            return html;
-        }
-
-        /** Creates a single dropdown menu with all courses (Used for Current Year Schedule - 8 generic slots) */
-        function createGenericDropdown(className, index) {
-            let allOptionsHTML = `<option value="">-- No Selection (Course ${index + 1}) --</option>`;
-            
-            for (const category in MASTER_COURSES) {
-                if (category !== "Select Course") {
-                    allOptionsHTML += getOptionsHTML(category, MASTER_COURSES[category]);
-                }
-            }
-            
-            const select = document.createElement('select');
-            select.className = `${className} w-full p-2 border border-gray-300 rounded-lg shadow-sm focus:ring-purple-500 focus:border-purple-500 bg-white`;
-            select.innerHTML = allOptionsHTML;
-            select.name = `current_course_${index}`;
-            
-            select.setAttribute('data-course-index', index);
-            select.addEventListener('change', saveDataToFirestore); // Add change listener for saving
-
-            const label = document.createElement('label');
-            label.className = 'block text-sm font-medium text-gray-700';
-            label.textContent = `Course ${index + 1}`;
-            
-            const div = document.createElement('div');
-            div.appendChild(label);
-            div.appendChild(select);
-            
-            return div;
-        }
-        
-        /** Generates HTML options filtered by allowed categories */
-        function getFilteredOptionsHTML(allowedCategories) {
-            let html = '<option value="">-- No Selection --</option>';
-            allowedCategories.forEach(categoryKey => {
-                const courses = MASTER_COURSES[categoryKey];
-                if (courses && courses.length > 0) {
-                    html += `<optgroup label="${categoryKey}">`;
-                    courses.forEach(course => {
-                        html += `<option value="${course}">${course}</option>`;
-                    });
-                    html += `</optgroup>`;
-                }
-            });
-            return html;
-        }
-
-        /** Creates a single categorized dropdown menu for the 4-year plan (7 fixed slots) */
-        function createPlanSlot(slotName, allowedCategories, year) {
-            const allOptionsHTML = getFilteredOptionsHTML(allowedCategories);
-            
-            const select = document.createElement('select');
-            select.className = `plan-course-select w-full p-2 border border-gray-300 rounded-lg shadow-sm focus:ring-blue-500 focus:border-blue-500 bg-white`;
-            select.innerHTML = allOptionsHTML;
-            select.name = `${year}_${slotName.toLowerCase().replace(/[^a-z0-9]/g, '_')}`; // Unique name
-            select.addEventListener('change', saveDataToFirestore); // Add change listener for saving
-            
-            const label = document.createElement('label');
-            label.className = 'block text-sm font-medium text-gray-700';
-            label.textContent = slotName;
-            
-            const div = document.createElement('div');
-            div.className = 'flex flex-col space-y-1'; 
-            div.appendChild(label);
-            div.appendChild(select);
-            
-            return div;
-        }
-
-        /** Populates a course container with dropdowns */
-        function populateCourseInputs(containerId, count, className) {
-            const container = document.getElementById(containerId);
-            container.innerHTML = '';
-            for (let i = 0; i < count; i++) {
-                container.appendChild(createGenericDropdown(className, i));
-            }
-        }
-        
-        /** Populates a course container with the 7 fixed plan slots */
-        function populatePlanInputs(containerId, year) {
-            const container = document.getElementById(containerId);
-            container.innerHTML = '';
-            
-            PLAN_SLOTS_DEFINITION.forEach(slot => {
-                container.appendChild(createPlanSlot(slot.name, slot.categories, year.replace(/\s/g, ''))); 
-            });
-        }
-        
-        /** Checks the API key status and updates the UI */
-        function checkApiKeyStatus() {
-            const statusEl = document.getElementById('apiKeyStatus');
-            if (API_KEY && API_KEY.length > 5) {
-                statusEl.innerHTML = `<span class="text-green-600">✅ Key Detected. OCR Ready.</span>`;
-            } else {
-                statusEl.innerHTML = `<span class="text-red-600 font-bold">❌ API Key Missing!</span> Add your key to the code to enable scanning.`;
-            }
-        }
-
-        window.onload = () => {
-            // Populate Current Year Schedule with 8 generic dropdowns
-            populateCourseInputs('currentCourseInputsContainer', 8, 'current-course-select');
-
-            // Populate 4-Year Plan sections with the 7 fixed, categorized slots
-            populatePlanInputs('plan9thGrade', '9th Grade');
-            populatePlanInputs('plan10thGrade', '10th Grade');
-            populatePlanInputs('plan11thGrade', '11th Grade');
-            populatePlanInputs('plan12thGrade', '12th Grade');
-
-            // Add change listeners to the top student info fields for saving
-            document.getElementById('studentName').addEventListener('change', saveDataToFirestore);
-            document.getElementById('recipientEmail').addEventListener('change', saveDataToFirestore);
-            document.getElementById('gradeLevel').addEventListener('change', saveDataToFirestore);
-            document.querySelectorAll('input[name="diploma"]').forEach(radio => {
-                radio.addEventListener('change', saveDataToFirestore);
-            });
-            
-            document.getElementById('compileButton').addEventListener('click', () => compileAndDisplayData(true));
-            document.getElementById('sendButton').addEventListener('click', sendDataViaAPI);
-            document.getElementById('scanButton').addEventListener('click', processOCRData);
-            
-            // Initial check for the API key status
-            checkApiKeyStatus();
-        };
-    </script>
-    <style>
-        body { font-family: 'Inter', sans-serif; }
-    </style>
-</head>
-<body class="bg-gray-100 min-h-screen p-4 sm:p-8">
-
-    <div class="max-w-6xl mx-auto bg-white shadow-xl rounded-xl p-6 md:p-10">
-        <h1 class="text-3xl font-extrabold text-purple-700 mb-4 border-b pb-2">Digital Student Schedule & 4-Year Plan Manager</h1>
-        <p class="text-gray-600 mb-6">
-            Use the form or the OCR scan feature to plan your high school courses. Your data is automatically saved.
-        </p>
-
-        <!-- User ID Display for Collaboration/Debugging -->
-        <div id="userIdDisplay" class="text-xs text-gray-500 mb-4 bg-gray-100 p-2 rounded hidden">
-            User ID: <span id="currentUserId" class="font-mono">Authenticating...</span>
-        </div>
-        
-        <!-- Input Section -->
-        <div id="digitalForm" class="space-y-6 mb-8 p-6 border border-purple-200 rounded-xl bg-purple-50 shadow-inner">
-            <h2 class="text-xl font-bold text-purple-800">1. Student Information & Current Year Schedule</h2>
-            
-            <!-- Student Info -->
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <div class="col-span-2">
-                    <label for="studentName" class="block text-sm font-medium text-gray-700 mb-1">Student Full Name</label>
-                    <input type="text" id="studentName" placeholder="Jane Doe" class="w-full p-2.5 border border-gray-300 rounded-lg shadow-sm focus:ring-purple-500 focus:border-purple-500">
+    const StudentInfo = () => (
+        <div className="p-4 bg-white rounded-lg shadow-md border border-indigo-100">
+            <h2 className="text-xl font-bold text-indigo-700 mb-4 flex items-center">
+                <User className="w-5 h-5 mr-2" /> Student Information
+            </h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label className="block text-sm font-medium text-gray-700">Student Name</label>
+                    <input
+                        type="text"
+                        value={studentName}
+                        onChange={(e) => setStudentName(e.target.value)}
+                        placeholder="Enter Student Name"
+                        className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 p-2 border"
+                    />
                 </div>
                 <div>
-                    <label for="gradeLevel" class="block text-sm font-medium text-gray-700 mb-1">Current Grade Level</label>
-                    <select id="gradeLevel" class="w-full p-2.5 border border-gray-300 rounded-lg shadow-sm focus:ring-purple-500 focus:border-purple-500 bg-white">
-                        <option value="9">9th Grade</option>
-                        <option value="10">10th Grade</option>
-                        <option value="11">11th Grade</option>
-                        <option value="12">12th Grade</option>
+                    <label className="block text-sm font-medium text-gray-700">Current Grade Level</label>
+                    <select
+                        value={gradeLevel}
+                        onChange={(e) => {
+                            setGradeLevel(e.target.value);
+                            setOcrResult(null); // Reset OCR context when grade changes
+                        }}
+                        className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 p-2 border bg-white"
+                    >
+                        {GRADE_LEVELS.map(g => (
+                            <option key={g} value={g}>{g}</option>
+                        ))}
                     </select>
                 </div>
-                <div>
-                    <label for="recipientEmail" class="block text-sm font-medium text-gray-700 mb-1">Recipient Email (Counselor/Parent)</label>
-                    <input type="email" id="recipientEmail" placeholder="counselor@school.edu" class="w-full p-2.5 border border-gray-300 rounded-lg shadow-sm focus:ring-purple-500 focus:border-purple-500">
-                </div>
             </div>
-
-            <!-- Diploma Type -->
-            <div class="pt-4 border-t border-purple-100">
-                <h3 class="text-lg font-semibold text-gray-700 mb-2">Diploma Type</h3>
-                <div class="flex flex-wrap gap-4">
-                    <label class="inline-flex items-center">
-                        <input type="radio" name="diploma" value="Standard" checked class="form-radio h-4 w-4 text-purple-600">
-                        <span class="ml-2 text-gray-700">Standard</span>
-                    </label>
-                    <label class="inline-flex items-center">
-                        <input type="radio" name="diploma" value="Honors" class="form-radio h-4 w-4 text-purple-600">
-                        <span class="ml-2 text-gray-700">Honors</span>
-                    </label>
-                    <label class="inline-flex items-center">
-                        <input type="radio" name="diploma" value="Work Force" class="form-radio h-4 w-4 text-purple-600">
-                        <span class="ml-2 text-gray-700">Work Force</span>
-                    </label>
-                </div>
-            </div>
-
-            <!-- Current Course Selections (8 Generic Slots) -->
-            <div class="pt-4 border-t border-purple-100">
-                <h3 class="text-lg font-semibold text-gray-700 mb-4">Current Year Course Selections (8 Slots)</h3>
-                <div id="currentCourseInputsContainer" class="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                    <!-- Dropdowns will be populated here by JavaScript -->
-                </div>
-            </div>
-
-            <h2 class="text-xl font-bold text-purple-800 pt-6 border-t">2. 4-Year Plan (7 Fixed Category Slots Per Year)</h2>
-
-            <div class="space-y-6">
-                <!-- 9th Grade Plan -->
-                <div class="plan-section p-4 border border-blue-200 rounded-lg bg-blue-50" data-year="9th Grade">
-                    <h3 class="text-lg font-bold text-blue-700 mb-3">9th Grade Courses</h3>
-                    <div id="plan9thGrade" class="grid grid-cols-2 md:grid-cols-3 gap-4">
-                        <!-- Dropdowns populated here -->
-                    </div>
-                </div>
-
-                <!-- 10th Grade Plan -->
-                <div class="plan-section p-4 border border-green-200 rounded-lg bg-green-50" data-year="10th Grade">
-                    <h3 class="text-lg font-bold text-green-700 mb-3">10th Grade Courses</h3>
-                    <div id="plan10thGrade" class="grid grid-cols-2 md:grid-cols-3 gap-4">
-                        <!-- Dropdowns populated here -->
-                    </div>
-                </div>
-
-                <!-- 11th Grade Plan -->
-                <div class="plan-section p-4 border border-red-200 rounded-lg bg-red-50" data-year="11th Grade">
-                    <h3 class="text-lg font-bold text-red-700 mb-3">11th Grade Courses</h3>
-                    <div id="plan11thGrade" class="grid grid-cols-2 md:grid-cols-3 gap-4">
-                        <!-- Dropdowns populated here -->
-                    </div>
-                </div>
-
-                <!-- 12th Grade Plan -->
-                <div class="plan-section p-4 border border-yellow-200 rounded-lg bg-yellow-50" data-year="12th Grade">
-                    <h3 class="text-lg font-bold text-yellow-700 mb-3">12th Grade Courses</h3>
-                    <div id="plan12thGrade" class="grid grid-cols-2 md:grid-cols-3 gap-4">
-                        <!-- Dropdowns populated here -->
-                    </div>
-                </div>
-            </div>
-            
         </div>
-        
-        <!-- OCR Upload Section (Moved to bottom) -->
-        <div class="space-y-4 mb-8 p-6 border border-gray-300 rounded-xl bg-gray-50 shadow-inner">
-            <h2 class="text-xl font-bold text-gray-800">3. Scan Schedule Card (Optional OCR)</h2>
-            <p class="text-gray-600">
-                Upload an **image** (JPEG or PNG) of your physical schedule card. The system will read the text and attempt to auto-fill the form above.
+    );
+
+    const CourseSelection = () => (
+        <div className="bg-white rounded-lg shadow-md border border-indigo-100 mt-6">
+            <div className="flex border-b border-indigo-200">
+                <button
+                    onClick={() => setActiveTab('manual')}
+                    className={`flex-1 py-3 px-4 text-center text-sm font-medium transition-colors duration-200 ${
+                        activeTab === 'manual'
+                            ? 'bg-indigo-600 text-white rounded-tl-lg'
+                            : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                    } flex items-center justify-center`}
+                >
+                    <List className="w-4 h-4 mr-2" /> Manual Selection
+                </button>
+                <button
+                    onClick={() => setActiveTab('ocr')}
+                    className={`flex-1 py-3 px-4 text-center text-sm font-medium transition-colors duration-200 ${
+                        activeTab === 'ocr'
+                            ? 'bg-indigo-600 text-white rounded-tr-lg'
+                            : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                    } flex items-center justify-center`}
+                >
+                    <Upload className="w-4 h-4 mr-2" /> OCR / Upload Card
+                </button>
+            </div>
+
+            <div className="p-4">
+                <h2 className="text-xl font-bold text-indigo-700 mb-4">
+                    2025-2026 Course Selection (Next Year)
+                </h2>
+
+                {activeTab === 'ocr' ? (
+                    <OcrSection />
+                ) : (
+                    <ManualSelectionSection />
+                )}
+            </div>
+        </div>
+    );
+
+    const ManualSelectionSection = () => (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {Object.entries(selectedCourses).map(([key]) => {
+                // Determine the subject category in COURSE_DATA
+                const subjectKey = ['English', 'Math', 'Science', 'Social Studies'].includes(key) ? key.toUpperCase() : 'ELECTIVES';
+                
+                // Use a Set to ensure course options are unique before converting back to an array
+                const rawCourses = availableCourses[subjectKey] || availableCourses['ELECTIVES'] || [];
+                const courseOptions = Array.from(new Set(rawCourses));
+
+
+                return (
+                    <div key={key}>
+                        <label className="block text-sm font-medium text-gray-700">{key}</label>
+                        <select
+                            value={selectedCourses[key]}
+                            onChange={(e) => handleCourseSelect(key, e.target.value)}
+                            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 p-2 border bg-white"
+                        >
+                            <option value="">-- Select a Course --</option>
+                            {courseOptions.map(course => (
+                                <option key={course} value={course}>{course}</option>
+                            ))}
+                        </select>
+                    </div>
+                );
+            })}
+        </div>
+    );
+
+    const OcrSection = () => (
+        <div className="space-y-4">
+            <p className="text-sm text-gray-600">
+                Upload a picture or PDF of the completed **{gradeLevel} Registration Form**. The system will use AI (Gemini API) to extract and auto-fill your course selections below.
             </p>
-            
-            <div id="apiKeyStatus" class="text-sm text-center p-2 rounded">
-                <!-- API Key Status will be injected here by JavaScript -->
-            </div>
-            
-            <div class="flex flex-col sm:flex-row gap-4">
-                <input type="file" id="fileInput" accept="image/jpeg, image/png" class="flex-1 w-full p-2.5 border border-gray-300 rounded-lg shadow-sm bg-white file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-red-100 file:text-red-700 hover:file:bg-red-200">
-                <button id="scanButton"
-                    class="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-150 ease-in-out shadow-md hover:shadow-lg disabled:bg-gray-400">
-                    Scan Card (Extract Data)
+            <div className="flex items-center space-x-4">
+                <input
+                    type="file"
+                    accept=".pdf,.jpg,.jpeg,.png"
+                    onChange={handleFileChange}
+                    className="flex-1 block w-full text-sm text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-gray-50 focus:outline-none file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
+                />
+                <button
+                    onClick={handleOCRSubmit}
+                    disabled={!selectedFile || isLoading}
+                    className={`px-4 py-2 rounded-lg text-white font-semibold transition-colors flex items-center justify-center ${
+                        selectedFile && !isLoading ? 'bg-indigo-600 hover:bg-indigo-700 shadow-md' : 'bg-gray-400 cursor-not-allowed'
+                    }`}
+                >
+                    {isLoading ? (
+                        <>
+                            <RotateCcw className="w-4 h-4 mr-2 animate-spin" /> Processing...
+                        </>
+                    ) : (
+                        <>
+                            <CheckCircle className="w-4 h-4 mr-2" /> Extract Courses
+                        </>
+                    )}
                 </button>
             </div>
-            
-            <!-- Raw Text Output Display -->
-            <div class="mt-4 pt-4 border-t border-gray-200">
-                <h3 class="text-lg font-semibold text-gray-700 mb-2">Raw Text Extracted from Card:</h3>
-                <pre id="ocrRawTextOutput" class="p-3 bg-white border border-gray-300 rounded-lg text-sm whitespace-pre-wrap">No schedule card has been scanned yet.</pre>
+            {message && (
+                <div className={`p-3 text-sm rounded-lg ${ocrResult?.success ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                    {message}
+                </div>
+            )}
+
+            {/* Display extracted/mapped courses for confirmation */}
+            <h3 className="font-semibold text-gray-700 pt-2">Mapped Courses (Review & Edit):</h3>
+            <ManualSelectionSection />
+        </div>
+    );
+
+    const FourYearPlan = () => {
+        const years = ['9th Grade', '10th Grade', '11th Grade', '12th Grade', 'Summer School'];
+        
+        return (
+            <div className="bg-white rounded-lg shadow-md border border-indigo-100 mt-6 p-4">
+                <h2 className="text-xl font-bold text-indigo-700 mb-4">
+                    <List className="w-5 h-5 mr-2 inline-block" /> Four Year Plan Overview
+                </h2>
+                <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                        <thead className="bg-indigo-50">
+                            <tr>
+                                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 uppercase tracking-wider sticky left-0 bg-indigo-50 z-10 w-48">
+                                    Subject
+                                </th>
+                                {years.map(year => (
+                                    <th key={year} className="px-3 py-2 text-left text-xs font-medium text-gray-700 uppercase tracking-wider w-32">
+                                        {year}
+                                    </th>
+                                ))}
+                            </tr>
+                        </thead>
+                        <tbody className="bg-white divide-y divide-gray-200">
+                            {FOUR_YEAR_SUBJECTS.map(subject => (
+                                <tr key={subject}>
+                                    <td className="px-3 py-2 whitespace-nowrap text-sm font-medium text-indigo-600 sticky left-0 bg-white w-48 border-r">
+                                        {subject.split('(')[0].trim()}
+                                    </td>
+                                    {years.map(year => {
+                                        let coreCourses = ['N/A']; // Default for years with no data or summer school
+                                        
+                                        if (COURSE_DATA[year]) {
+                                            // Get courses from core subjects for this year
+                                            const rawCoreCourses = [
+                                                ...(COURSE_DATA[year].ENGLISH || []),
+                                                ...(COURSE_DATA[year].MATHEMATICS || []),
+                                                ...(COURSE_DATA[year].SCIENCE || []),
+                                                ...(COURSE_DATA[year]['SOCIAL STUDIES'] || []),
+                                                'Other Elective'
+                                            ].filter(Boolean); // Filter out any falsey values
+                                            
+                                            // Ensure unique keys for options
+                                            coreCourses = Array.from(new Set(rawCoreCourses));
+                                        }
+
+                                        return (
+                                            <td key={`${subject}-${year}`} className="px-3 py-2">
+                                                <select
+                                                    value={fourYearPlan[subject][year]}
+                                                    onChange={(e) => handleFourYearPlanChange(subject, year, e.target.value)}
+                                                    className="w-full text-xs rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 p-1 border bg-white"
+                                                >
+                                                    <option value="">- Select -</option>
+                                                    {coreCourses.map(course => (
+                                                        // Use the course name itself as the key since the list is now unique
+                                                        <option key={course} value={course}>{course}</option>
+                                                    ))}
+                                                </select>
+                                            </td>
+                                        );
+                                    })}
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+                <p className="text-xs text-gray-500 mt-4">
+                    *The course options in the 4-Year Plan are simplified for demonstration; in a live version, these would link to a complete academic catalog.
+                </p>
+            </div>
+        );
+    };
+
+    return (
+        <div className="min-h-screen bg-gray-100 p-4 sm:p-8 font-sans">
+            <style>{`
+                /* Inter font */
+                @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+                body { font-family: 'Inter', sans-serif; }
+            `}</style>
+            <div className="max-w-4xl mx-auto">
+                <header className="text-center mb-8">
+                    <h1 className="text-3xl font-extrabold text-indigo-800">Counselor Course Planning Assistant</h1>
+                    <p className="text-lg text-gray-600 mt-2">Hartselle High School Course Registration 2025-2026</p>
+                </header>
+
+                <StudentInfo />
+                <CourseSelection />
+                <FourYearPlan />
+
+                <div className="mt-8 pt-6 border-t border-indigo-200 flex flex-col items-center">
+                    <button
+                        onClick={handleSubmit}
+                        disabled={!studentName || isLoading}
+                        className={`px-6 py-3 rounded-lg text-white font-bold transition-transform transform ${
+                            studentName && !isLoading ? 'bg-green-600 hover:bg-green-700 shadow-lg hover:scale-[1.02]' : 'bg-gray-400 cursor-not-allowed'
+                        } flex items-center`}
+                    >
+                        {isLoading ? (
+                             <>
+                                <RotateCcw className="w-5 h-5 mr-2 animate-spin" /> Submitting...
+                            </>
+                        ) : (
+                            <>
+                                <Mail className="w-5 h-5 mr-2" />
+                                Submit Course Plan
+                            </>
+                        )}
+                    </button>
+                </div>
+                
+                <div className="mt-8 p-4 bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 rounded-lg text-sm">
+                    <p className="font-semibold">Important Notes:</p>
+                    <p>1. **OCR Live:** The **OCR/Upload Card** feature uses the **Gemini API** for multimodal (image/PDF) analysis and course extraction.</p>
+                    <p>2. **Submission:** The "Submit Course Plan" button now sends all the data directly to your Formspree endpoint (`https://formspree.io/f/xzznvqld`).</p>
+                </div>
             </div>
         </div>
+    );
+};
 
-        <!-- Submission Section -->
-        <div class="p-6 border border-gray-300 rounded-xl bg-gray-50 shadow-inner space-y-4">
-            <h2 class="text-xl font-bold text-gray-800">4. Data Compilation & Submission</h2>
-
-            <p class="text-gray-600">Review all information above. Click the button to generate the final summary, then "Send" to finalize the submission.</p>
-
-            <!-- Buttons -->
-            <div class="flex flex-col sm:flex-row gap-4 pt-4">
-                <button id="compileButton"
-                    class="flex-1 bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-4 rounded-lg transition duration-150 ease-in-out shadow-md hover:shadow-lg disabled:bg-gray-400">
-                    1. Compile All Data
-                </button>
-                <button id="sendButton" disabled
-                    class="flex-1 bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-4 rounded-lg transition duration-150 ease-in-out shadow-md hover:shadow-lg disabled:bg-gray-400">
-                    2. Send Data via Mock API
-                </button>
-            </div>
-            
-            <!-- Status Message -->
-            <div id="statusMessage" class="mt-4 p-3 text-center rounded-lg bg-yellow-100 text-yellow-800 font-medium">
-                Enter your course selections, then click 'Compile All Data'. Your data is saving automatically!
-            </div>
-
-            <!-- Output Display -->
-            <div id="extractionOutput" class="mt-6">
-                <!-- Data summary will be displayed here -->
-            </div>
-        </div>
-
-    </div>
-
-</body>
-</html>
+export default App;
