@@ -170,9 +170,6 @@
             <h2 class="text-2xl font-semibold text-gray-800 mb-4">2. OCR Upload and Data Correction (Next Year's Classes)</h2>
             
             <div class="space-y-4 p-4 border border-blue-200 rounded-lg bg-blue-50">
-                <p class="text-sm text-red-600 font-medium">
-                    <i class="fas fa-exclamation-triangle mr-1"></i> **Attention:** The OCR feature is currently disabled because the required API key is missing or invalid. Please obtain a new API key from your environment settings and update the `API_KEY` variable in the script block below to enable this feature, or proceed to the "Manual Selection" tab.
-                </p>
                 <label for="image-upload" class="block text-sm font-medium text-gray-700">Select Image of Course Form:</label>
                 <input type="file" id="image-upload" accept="image/*" class="w-full border border-gray-300 p-2 rounded-lg focus:ring-blue-500 focus:border-blue-500">
                 <button type="button" id="ocr-button" onclick="startOCR()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg shadow-md transition duration-200 flex items-center justify-center">
@@ -248,10 +245,8 @@
         const API_MODEL = 'gemini-2.5-flash-preview-09-2025';
         
         // --- API KEY REQUIRED HERE ---
-        // !!! IMPORTANT: The previous API key was reported as leaked. 
-        // Please replace the empty string below with a new, valid Gemini API Key 
-        // to enable the OCR and 4-Year Plan features.
-        const API_KEY = ""; 
+        // !!! API Key has been successfully inserted below. OCR and 4-Year Plan features are now enabled.
+        const API_KEY = "AIzaSyCJHXAE1-UVqkUpJpdGIAHnyRtwPK6-Tfc"; 
         // -----------------------------
         
         const COUNSELOR_EMAIL_HARDCODED = "counselor@school.edu"; // Hardcoded email as requested
@@ -443,12 +438,33 @@
                     if (response.ok) {
                         return response;
                     }
+                    
+                    let errorBody = {};
                     let errorMessage = `API Error: ${response.status} - ${response.statusText}`;
+
                     try {
-                        const errorBody = await response.json();
+                        errorBody = await response.json();
+                        // Extract specific error details
                         errorMessage = errorBody.error?.message || errorMessage;
-                    } catch (e) { /* ignore JSON parsing error */ }
+                        
+                        // Check for the specific "model is overloaded" error code (429 or 'is_overloaded')
+                        if (response.status === 429 || errorBody.error?.status === 'RESOURCE_EXHAUSTED' || errorMessage.includes("overloaded")) {
+                            console.warn(`Attempt ${i + 1}: Model is overloaded. Retrying in ${Math.pow(2, i)}s...`);
+                            if (i < retries - 1) {
+                                // If overloaded, continue to the next iteration (retry)
+                                const delay = Math.pow(2, i) * 1000;
+                                await new Promise(resolve => setTimeout(resolve, delay));
+                                continue; 
+                            }
+                        }
+                    } catch (e) { 
+                        // If JSON parsing fails, we use the default status message
+                        console.warn("Could not parse error body as JSON.");
+                    }
+                    
+                    // If not successful and not recoverable (overloaded), throw the error
                     throw new Error(errorMessage);
+
                 } catch (error) {
                     if (i === retries - 1) throw error;
                     const delay = Math.pow(2, i) * 1000;
@@ -498,7 +514,7 @@
 
             } catch (error) {
                 console.error("4-Year Plan API Call Failed:", error);
-                modalBody.innerHTML = `<p class="text-red-500 p-4">Error generating 4-Year Plan. Please ensure your API key is correct and try again, or manually review your selected courses.</p>`;
+                modalBody.innerHTML = `<p class="text-red-500 p-4">Error generating 4-Year Plan: ${error.message}. Please try again, or manually review your selected courses.</p>`;
             }
         }
 
@@ -507,10 +523,11 @@
         async function startOCR() {
             if (!validateStudentInfo()) return;
             
+            // Check if API key is provided, if not, show a clean error modal
             if (API_KEY === "") { 
                 showModal(
-                    '<i class="fas fa-key"></i> API Key Missing/Invalid', 
-                    'The OCR feature requires a valid API key to call the Gemini Vision model. Please paste a new key into the `API_KEY` variable in the script block to enable this feature.'
+                    '<i class="fas fa-key"></i> Feature Disabled', 
+                    'The OCR feature requires a valid API key to call the Gemini Vision model. Please paste your key into the script block to enable this feature, or proceed to the Manual Selection tab.'
                 );
                 return;
             }
